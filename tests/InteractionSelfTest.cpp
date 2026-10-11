@@ -42,6 +42,9 @@
 // 阶段9 追加：窗口布局持久化（窗口1 改尺寸+浮动 Dock 关闭 → 窗口2 恢复一致；
 // 首次运行默认 1440×900 三栏；用例前后清空布局键沿用哨兵模式）、
 // 倍速下拉框"倍速"标注（speedLabel）与 ToolTip。
+// 关闭项目追加：文件菜单"关闭项目(&C)"——过未保存门卫后回启动页（门卫取消留在
+// 原项目且不弹启动页；启动页选空项目则运行时重置为默认空舞台、撤销栈清空、
+// 主窗口重新显示；不脏时直弹启动页无门卫弹窗；启动页取消 = 退出程序，列手测）。
 //
 // 运行（Git Bash，项目根目录）：
 //   QT_QPA_PLATFORM=offscreen ./build/Debug/InteractionSelfTest.exe
@@ -1813,6 +1816,82 @@ int main(int argc, char* argv[])
         settings9.setWindowState(QByteArray());
         CHECK(settings9.windowGeometry().isEmpty() && settings9.windowState().isEmpty(),
               "阶段9：用例结尾清理布局设置键");
+    }
+
+    // ==================== 关闭项目：文件菜单回启动页 ====================
+    const auto findCloseProjectAction = [](MainWindow& w) -> QAction* {
+        for (QAction* action : w.findChildren<QAction*>()) {
+            if (action->text() == QStringLiteral("关闭项目(&C)"))
+                return action;
+        }
+        return nullptr;
+    };
+    CHECK(findCloseProjectAction(window) != nullptr, "关闭项目：文件菜单项存在");
+
+    // 门卫取消 → 留在原项目，不弹启动页
+    {
+        MainWindow w10;
+        w10.show();
+        QTest::qWaitForWindowExposed(&w10);
+        auto* core10 = w10.findChild<EditorCore*>();
+        auto* runtime10 = w10.findChild<RuntimeData*>();
+        CHECK(core10->createObject(ObjectType::Actor, QPointF(0.0, 0.0)),
+              "关闭项目：制造未保存修改");
+        QAction* action10 = findCloseProjectAction(w10);
+        bool startDialogAppeared = false;
+        QTimer::singleShot(300, [] {
+            if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+                box->button(QMessageBox::Cancel)->click();
+        });
+        QTimer::singleShot(900, [&startDialogAppeared] {
+            if (qobject_cast<StartDialog*>(QApplication::activeModalWidget()))
+                startDialogAppeared = true;
+        });
+        action10->trigger();
+        QTest::qWait(1000); // 给第二个定时器留出触发窗口
+        CHECK(w10.isVisible() && runtime10->isDirty()
+                  && runtime10->fileData().objects.size() == 1 && !startDialogAppeared,
+              "关闭项目：门卫取消留在原项目、不弹启动页");
+    }
+
+    // 门卫选不保存 → 启动页选空项目 → 运行时重置、主窗口重新显示
+    {
+        MainWindow w11;
+        w11.show();
+        QTest::qWaitForWindowExposed(&w11);
+        auto* core11 = w11.findChild<EditorCore*>();
+        auto* runtime11 = w11.findChild<RuntimeData*>();
+        CHECK(core11->createObject(ObjectType::Actor, QPointF(0.0, 0.0)),
+              "关闭项目：制造未保存修改");
+        QAction* action11 = findCloseProjectAction(w11);
+        QTimer::singleShot(300, [] {
+            if (auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+                box->button(QMessageBox::Discard)->click();
+        });
+        QTimer::singleShot(900, [] {
+            if (auto* dialog = qobject_cast<StartDialog*>(QApplication::activeModalWidget()))
+                dialog->findChild<QPushButton*>(QStringLiteral("emptyProjectButton"))->click();
+        });
+        action11->trigger();
+        CHECK(w11.isVisible(), "关闭项目：选空项目后主窗口重新显示");
+        CHECK(runtime11->fileData().objects.isEmpty() && !runtime11->isDirty()
+                  && w11.windowTitle().contains(QStringLiteral("未命名")),
+              "关闭项目：运行时重置为默认空舞台");
+        CHECK(!core11->canUndo(), "关闭项目：撤销栈随 newFile 清空");
+
+        // 不脏 → 直弹启动页（无门卫弹窗），再选空项目回来
+        bool guardAppeared = false;
+        QTimer::singleShot(300, [&guardAppeared] {
+            if (qobject_cast<QMessageBox*>(QApplication::activeModalWidget()))
+                guardAppeared = true;
+        });
+        QTimer::singleShot(900, [] {
+            if (auto* dialog = qobject_cast<StartDialog*>(QApplication::activeModalWidget()))
+                dialog->findChild<QPushButton*>(QStringLiteral("emptyProjectButton"))->click();
+        });
+        action11->trigger();
+        CHECK(!guardAppeared && w11.isVisible() && runtime11->fileData().objects.isEmpty(),
+              "关闭项目：不脏直回启动页（无门卫弹窗）");
     }
 
     out() << Qt::endl;

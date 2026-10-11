@@ -5,6 +5,7 @@
 #include "SettingsWindow.h"
 #include "StageScene.h"
 #include "StageView.h"
+#include "StartDialog.h"
 #include "TimelineWidget.h"
 #include "business/EditorCore.h"
 #include "business/SelectionModel.h"
@@ -52,7 +53,7 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::updateWindowTitle);
 
     // 阶段8：构造函数不再加载任何文件（构造即默认空舞台，无文件 IO）；
-    // 启动时的存档选择由 main.cpp 的启动页决定（截图自测模式直开示例存档）
+    // 启动时的存档选择由启动页（runStartDialogLoop）决定，截图自测模式直开示例存档
     updateWindowTitle();
     m_view->resetView();
 
@@ -170,13 +171,55 @@ void MainWindow::closeEvent(QCloseEvent* event)
 {
     if (maybeCloseOrContinue()) {
         // 确认关闭才持久化布局（阶段9）；QSettings 写失败静默跳过，不影响关闭
-        AppSettings settings;
-        settings.setWindowGeometry(saveGeometry());
-        settings.setWindowState(saveState());
+        saveWindowLayout();
         event->accept();
     } else {
         event->ignore();
     }
+}
+
+void MainWindow::saveWindowLayout()
+{
+    AppSettings settings;
+    settings.setWindowGeometry(saveGeometry());
+    settings.setWindowState(saveState());
+}
+
+// ---- 启动页（阶段8 启动流程；"关闭项目"复用同一页）----
+
+bool MainWindow::runStartDialogLoop()
+{
+    // 打开失败（openFromPath 已弹提示）→ 移除失效条目并重新弹启动页
+    for (;;) {
+        StartDialog dialog(this);
+        if (dialog.exec() != QDialog::Accepted)
+            return false; // Esc/标题栏关闭 = 不继续（调用方退出程序）
+        if (dialog.choice() != StartDialog::Choice::OpenPath) {
+            // 新建/空项目：重置为默认空舞台（启动时构造本就是空舞台，等效）
+            m_runtimeData->newFile();
+            return true;
+        }
+        const QString path = dialog.selectedPath();
+        if (openFromPath(path))
+            return true;
+        AppSettings settings;
+        settings.removeRecentFile(path);
+    }
+}
+
+void MainWindow::closeProject()
+{
+    if (!maybeCloseOrContinue())
+        return; // 门卫取消：留在原项目
+    // 回启动页（与启动时同一页：取消它 = 退出程序）。该退出路径不走 closeEvent，
+    // 退出前补一次布局落盘，与正常退出行为一致
+    hide();
+    if (!runStartDialogLoop()) {
+        saveWindowLayout();
+        QCoreApplication::quit();
+        return;
+    }
+    show();
 }
 
 void MainWindow::updateWindowTitle()
@@ -251,6 +294,9 @@ void MainWindow::setupMenus()
         if (!path.isEmpty())
             saveToPath(path);
     });
+    // 关闭项目：过未保存门卫后回启动页（与启动时同一页，可另选项目或新建）
+    QAction* closeProjectAction = fileMenu->addAction(QStringLiteral("关闭项目(&C)"));
+    connect(closeProjectAction, &QAction::triggered, this, &MainWindow::closeProject);
     fileMenu->addSeparator();
     QAction* quitAction = fileMenu->addAction(QStringLiteral("退出(&X)"));
     connect(quitAction, &QAction::triggered, this, &QWidget::close); // closeEvent 过未保存门卫

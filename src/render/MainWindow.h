@@ -37,6 +37,10 @@ public:
     // 选"保存"走保存流程（含无路径转另存为），保存失败或取消返回 false
     bool maybeCloseOrContinue();
 
+    // 启动页循环（启动与"关闭项目"共用）：新建/空项目（重置为默认空舞台）/
+    // 打开成功返回 true；启动页被取消（Esc/关闭）返回 false = 退出程序
+    bool runStartDialogLoop();
+
 protected:
     void closeEvent(QCloseEvent* event) override; // 过同一未保存门卫，取消则 ignore()
 
@@ -46,6 +50,8 @@ private:
     void updateEditActions(); // 撤销/重做随栈状态；复制/粘贴/删除随选中与剪贴板
     void updateWindowTitle(); // 标题栏：文件名[*] - 应用名（[*] 随 dirty 显示）
     bool saveWithDialog();    // 保存流程：有路径直存；无路径弹另存为对话框取路径
+    void closeProject();      // 文件菜单"关闭项目"：过门卫 → 隐藏主窗口回启动页
+    void saveWindowLayout();  // 布局落盘（closeEvent 与关闭项目的退出路径共用）
     // 统一设置窗口（阶段7）：菜单栏顶层"设置"项直达（舞台/偏好两个旧入口已并入），
     // 打开定位"舞台"分类
     SettingsWindow* ensureSettingsWindow(); // 懒创建

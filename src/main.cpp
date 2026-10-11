@@ -1,9 +1,7 @@
 #include <QApplication>
 #include <QStringList>
 
-#include "data/AppSettings.h"
 #include "render/MainWindow.h"
-#include "render/StartDialog.h"
 
 int main(int argc, char* argv[])
 {
@@ -36,20 +34,9 @@ int main(int argc, char* argv[])
         return app.exec();
     }
 
-    // 正常启动：启动页选择要打开的项目（启动页只出现一次；关闭它 = 不启动主界面）。
-    // 打开失败（openFromPath 已弹提示）→ 移除失效条目并重新弹启动页
-    for (;;) {
-        StartDialog dialog(&window);
-        if (dialog.exec() != QDialog::Accepted)
-            return 0; // Esc/标题栏关闭 = 退出程序
-        if (dialog.choice() != StartDialog::Choice::OpenPath)
-            break;    // 新建/空项目：MainWindow 构造已是默认空舞台
-        const QString path = dialog.selectedPath();
-        if (window.openFromPath(path))
-            break;
-        AppSettings settings;
-        settings.removeRecentFile(path);
-    }
+    // 正常启动：启动页选择要打开的项目（"关闭项目"也会回到该页；关闭它 = 退出程序）。
+    if (!window.runStartDialogLoop())
+        return 0;
 
     window.show();
     return app.exec();
