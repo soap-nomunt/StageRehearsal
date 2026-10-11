@@ -84,13 +84,7 @@ src/
   render/         渲染层：主窗口、视口 / 场景、各对象图元、Hierarchy / Inspector、时间轴控件
 tests/            自测程序源码（DataLayerSelfTest / InteractionSelfTest）
 examples/         示例存档 stage-demo.json
-doc/              设计文档（需求、实施计划、提示词）
 ```
-
-## 文档
-
-- 需求说明：[doc/需求.md](doc/需求.md)
-- 实施计划：[doc/实施计划.md](doc/实施计划.md)
 
 ## 许可证
 

@@ -6,6 +6,9 @@ out/
 # 分发打包产物（含 exe 和依赖 DLL，体积大，不上传）
 dist/
 
+# 项目内部设计文档（仅本地保留，不上传）
+doc/
+
 # CMake 生成物（防止在源码目录内直接 configure 时混入）
 CMakeCache.txt
 CMakeFiles/
