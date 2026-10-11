@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "stage": { "width": 1500, "depth": 900, "centerOffset": 100 },
+  "objects": [
+    {
+      "id": "actor-001", "type": "actor", "name": "张三", "color": "#e74c3c",
+      "transform": { "x": 300, "y": 200, "rotation": 0 },
+      "keyframes": []
+    },
+    {
+      "id": "actor-002", "type": "actor", "name": "李四", "color": "#3498db",
+      "transform": { "x": -350, "y": 400, "rotation": 90 },
+      "keyframes": []
+    },
+    {
+      "id": "actor-003", "type": "actor", "name": "王五", "color": "#27ae60",
+      "transform": { "x": 550, "y": 600, "rotation": 270 },
+      "keyframes": []
+    },
+    {
+      "id": "screen-001", "type": "screen", "name": "屏风1", "color": "#888888",
+      "size": { "w": 200, "h": 10 },
+      "transform": { "x": -150, "y": 100, "rotation": 90 },
+      "keyframes": []
+    },
+    {
+      "id": "screen-002", "type": "screen", "name": "屏风2", "color": "#9b59b6",
+      "transform": { "x": 400, "y": 500, "rotation": 0 },
+      "keyframes": []
+    }
+  ],
+  "timeline": {
+    "duration": 60.0,
+    "labels": [ { "t": 0.0, "name": "第一幕" } ]
+  }
+}

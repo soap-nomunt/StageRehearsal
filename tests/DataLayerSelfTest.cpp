@@ -1,0 +1,1830 @@
+// 数据层自测程序（独立可执行目标，不影响主程序）。
+// 覆盖：存档往返逐字段比对、损坏/版本不符/缺失/结构非法文件的错误枚举、
+// AppSettings 的 QSettings 跨进程持久化、RuntimeData 基本行为；
+// 业务层命令 apply/revert（含层级整理 reparent、级联删除）、EditorCore 集成、
+// parent/group 存档兼容（旧存档无 parent 字段视为顶层）；
+// 阶段4：UndoStack 入栈/撤销/重做/redo 区清空/文件替换清栈、
+// 20 步确定性操作序列逐级撤销回初始再逐级重做一致。
+// 阶段5：TimelinePlayer 插值（直线匀速/最短弧/首前末后保持/单帧/乱序防御）、
+// 时间轴命令往返（upsert/删除/改时刻/标签/时长自动延长）、打帧流程
+// （已有帧直接更新/无帧询问/选否零变更/抑制直打/打帧按钮显示值/空对象跳过）、
+// 撤销/重做关键帧命令后游标处插值立即刷新、播放 tick 到末尾自动停止。
+// 时间轴交互完善追加：批量改时刻（多对象平移/覆盖/clamp 0/同批后者覆盖前者/
+// 时长延长/redo 幂等）、场次标签移动（重排/名不变/时长延长）、EditorCore
+// 关键帧级剪贴板（游标对齐粘贴/相对间隔/upsert 覆盖/撤销/目标删除跳过）。
+// 阶段6 追加：RuntimeData dirty 跟踪（快照比较、dirtyChanged 只在翻转时发、
+// 撤销回已存内容 = 干净）。
+// 阶段7：EditorCore::setStage 直改直提交语义——合法修改生效 / 宽深非法拒绝 /
+// 无变更不提交 / 不产生撤销条目（canUndo 不变）/ undo 不影响舞台值。
+// 阶段8：AppSettings 最近使用列表（MRU：追加置顶 / 大小写不敏感去重 / 超 10 条
+// 截断 / removeRecentFile / 跨实例读回）；RuntimeData::openFile/saveFile 成功
+// 入 MRU、openFile 失败不入。
+#include "business/Commands.h"
+#include "business/EditorCore.h"
+#include "business/KeyframeCommands.h"
+#include "business/SelectionModel.h"
+#include "business/TimelinePlayer.h"
+#include "business/UndoStack.h"
+#include "data/AppSettings.h"
+#include "data/DataTypes.h"
+#include "data/JsonStore.h"
+#include "data/RuntimeData.h"
+#include "render/RenderUtil.h"
+
+#include <QCoreApplication>
+#include <QEventLoop>
+#include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QProcess>
+#include <QTemporaryDir>
+#include <QTextStream>
+#include <QTimer>
+
+namespace {
+
+int g_failures = 0;
+
+QTextStream& out()
+{
+    static QTextStream stream(stdout);
+    return stream;
+}
+
+#define CHECK(condition, message)                                                        \
+    do {                                                                                 \
+        if (condition) {                                                                 \
+            out() << "[PASS] " << message << Qt::endl;                                   \
+        } else {                                                                         \
+            out() << "[FAIL] " << message << " (" << __FILE__ << ":" << __LINE__ << ")"  \
+                  << Qt::endl;                                                           \
+            ++g_failures;                                                                \
+        }                                                                                \
+    } while (0)
+
+// 本进程内使用的独立设置区，避免污染正式软件的设置
+const char kTestOrgName[] = "StageRehearsal";
+const char kTestAppName[] = "StageRehearsalSelfTest";
+
+bool writeTextFile(const QString& path, const QByteArray& content)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+        return false;
+    return file.write(content) == content.size();
+}
+
+// 构造一份带自定义数值的数据：舞台 / 演员（3 关键帧）/ 屏风（size + 2 关键帧）/ 2 个场次标签。
+// 数值均取二进制可精确表示的“整齐”值，保证 double 严格相等。
+FileData makeSampleData()
+{
+    FileData data;
+    data.stage = { 1500.0, 900.0, 50.0 };
+
+    ObjectData actor;
+    actor.id = QStringLiteral("actor-001");
+    actor.type = ObjectType::Actor;
+    actor.name = QStringLiteral("张三");
+    actor.color = QColor(QStringLiteral("#e74c3c"));
+    actor.transform = { 300.0, 200.0, 45.0 };
+    actor.keyframes = {
+        { 2.0, 300.0, 200.0, 45.0 },
+        { 5.5, 400.0, 250.0, 90.0 },
+        { 9.0, 350.0, 300.0, 135.0 },
+    };
+    data.objects.append(actor);
+
+    ObjectData screen;
+    screen.id = QStringLiteral("screen-001");
+    screen.type = ObjectType::Screen;
+    screen.name = QStringLiteral("屏风1");
+    screen.color = QColor(QStringLiteral("#888888"));
+    screen.size = QSizeF(100.0, 10.0);
+    screen.transform = { -150.0, 100.0, 90.0 };
+    screen.keyframes = {
+        { 1.0, -150.0, 100.0, 90.0 },
+        { 7.25, -50.0, 150.0, 0.0 },
+    };
+    data.objects.append(screen);
+
+    data.timeline.duration = 90.5;
+    data.timeline.labels = {
+        { 0.0, QStringLiteral("第一幕") },
+        { 45.25, QStringLiteral("第二幕") },
+    };
+    return data;
+}
+
+void testTypeMapping()
+{
+    ObjectType type = ObjectType::Actor;
+    CHECK(objectTypeToString(ObjectType::Actor) == QStringLiteral("actor"), "ObjectType::Actor -> \"actor\"");
+    CHECK(objectTypeToString(ObjectType::Screen) == QStringLiteral("screen"), "ObjectType::Screen -> \"screen\"");
+    CHECK(objectTypeToString(ObjectType::Prop) == QStringLiteral("prop"), "ObjectType::Prop -> \"prop\"（预留道具）");
+    CHECK(objectTypeFromString(QStringLiteral("prop"), type) && type == ObjectType::Prop, "\"prop\" -> ObjectType::Prop");
+    CHECK(objectTypeToString(ObjectType::Group) == QStringLiteral("group"), "ObjectType::Group -> \"group\"");
+    CHECK(objectTypeFromString(QStringLiteral("group"), type) && type == ObjectType::Group, "\"group\" -> ObjectType::Group");
+    CHECK(!objectTypeFromString(QStringLiteral("camera"), type), "未知类型字符串被拒绝");
+}
+
+// 阶段2：角度制式换算（RenderUtil.h，不依赖 Widgets）。
+// 需求制式：0°=+y（朝下）、逆时针增大；验收约定 rotation=90 朝左（−x）。
+void testAngleConversion()
+{
+    // 需求角度 → Qt setRotation 角度：恒等映射（推导见 RenderUtil.h 注释）
+    CHECK(RenderUtil::toQtRotation(0.0) == 0.0, "toQtRotation(0) = 0");
+    CHECK(RenderUtil::toQtRotation(90.0) == 90.0, "toQtRotation(90) = 90");
+    CHECK(RenderUtil::toQtRotation(-45.0) == -45.0, "toQtRotation(-45) = -45（负角直传）");
+
+    // 朝向单位向量（场景坐标 x 右、y 下）
+    const QPointF down = RenderUtil::directionVector(0.0);
+    CHECK(qAbs(down.x()) < 1e-9 && qAbs(down.y() - 1.0) < 1e-9,
+          "rotation=0 → 朝向 +y（朝下）");
+    const QPointF left = RenderUtil::directionVector(90.0);
+    CHECK(qAbs(left.x() + 1.0) < 1e-9 && qAbs(left.y()) < 1e-9,
+          "rotation=90 → 朝向 −x（朝左）");
+    const QPointF up = RenderUtil::directionVector(180.0);
+    CHECK(qAbs(up.x()) < 1e-9 && qAbs(up.y() + 1.0) < 1e-9,
+          "rotation=180 → 朝向 −y（朝上）");
+    const QPointF right = RenderUtil::directionVector(270.0);
+    CHECK(qAbs(right.x() - 1.0) < 1e-9 && qAbs(right.y()) < 1e-9,
+          "rotation=270 → 朝向 +x（朝右）");
+}
+
+// 阶段3：rotationFromVector 反向换算（归一化到 [0,360)，与 directionVector 往返一致）
+void testRotationFromVector()
+{
+    // 基准方向向量 → 需求角度
+    CHECK(qAbs(RenderUtil::rotationFromVector(QPointF(0.0, 1.0))) < 1e-9,
+          "向量(0,1) → 0°");
+    CHECK(qAbs(RenderUtil::rotationFromVector(QPointF(-1.0, 0.0)) - 90.0) < 1e-9,
+          "向量(-1,0) → 90°");
+    CHECK(qAbs(RenderUtil::rotationFromVector(QPointF(0.0, -1.0)) - 180.0) < 1e-9,
+          "向量(0,-1) → 180°");
+    CHECK(qAbs(RenderUtil::rotationFromVector(QPointF(1.0, 0.0)) - 270.0) < 1e-9,
+          "向量(1,0) → 270°");
+
+    // 零向量无朝向 → 0；非单位向量按方向归一
+    CHECK(RenderUtil::rotationFromVector(QPointF(0.0, 0.0)) == 0.0, "零向量 → 0°");
+    CHECK(qAbs(RenderUtil::rotationFromVector(QPointF(0.0, 5.0))) < 1e-9,
+          "非单位向量(0,5) → 0°");
+    CHECK(qAbs(RenderUtil::rotationFromVector(QPointF(-2.0, -2.0)) - 135.0) < 1e-9,
+          "向量(-2,-2) → 135°");
+
+    // 与 directionVector 往返一致（含 [0,360) 归一化边界）
+    for (double degrees : { 0.0, 1.0, 30.0, 45.0, 89.9, 90.0, 135.0, 179.9,
+                            180.0, 225.0, 270.0, 315.0, 359.9 }) {
+        const double roundTrip =
+            RenderUtil::rotationFromVector(RenderUtil::directionVector(degrees));
+        CHECK(qAbs(roundTrip - degrees) < 1e-9,
+              QStringLiteral("directionVector→rotationFromVector 往返一致 θ=%1").arg(degrees));
+    }
+}
+
+// 阶段3：命令 apply/revert 往返（移动/创建/删除各一，revert 后 FileData 逐字段还原）
+void testCommandRoundTrip()
+{
+    const FileData original = makeSampleData();
+
+    // 移动（SetTransformsCommand 同时覆盖拖拽移动/方向键微调/Inspector 位置朝向）
+    {
+        FileData data = original;
+        SetTransformsCommand move({ { QStringLiteral("actor-001"), { 500.0, 600.0, 45.0 } } });
+        move.apply(data);
+        CHECK(data.objects.at(0).transform == Transform({ 500.0, 600.0, 45.0 }),
+              "移动命令 apply 生效");
+        CHECK(data != original, "移动命令 apply 后与原数据不同");
+        move.revert(data);
+        CHECK(data == original, "移动命令 revert 后 FileData 逐字段还原");
+    }
+
+    // 旋转（同一命令类，改朝向）
+    {
+        FileData data = original;
+        SetTransformsCommand rotate({ { QStringLiteral("screen-001"),
+                                        { -150.0, 100.0, 270.0 } } });
+        rotate.apply(data);
+        CHECK(qAbs(data.objects.at(1).transform.rotation - 270.0) < 1e-12,
+              "旋转命令 apply 生效");
+        rotate.revert(data);
+        CHECK(data == original, "旋转命令 revert 后 FileData 逐字段还原");
+    }
+
+    // 创建（粘贴同用 AddObjectsCommand）
+    {
+        FileData data = original;
+        ObjectData created;
+        created.id = QStringLiteral("actor-002");
+        created.type = ObjectType::Actor;
+        created.name = QStringLiteral("角色1");
+        created.color = QColor(QStringLiteral("#3498db"));
+        created.transform = { 0.0, 0.0, 0.0 };
+        AddObjectsCommand create(QList<ObjectData> { created });
+        create.apply(data);
+        CHECK(data.objects.size() == 3 && data.objects.at(2) == created,
+              "创建命令 apply 生效");
+        create.revert(data);
+        CHECK(data == original, "创建命令 revert 后 FileData 逐字段还原");
+    }
+
+    // 删除（含原位还原：删第二个对象，revert 后顺序不变）
+    {
+        FileData data = original;
+        RemoveObjectsCommand remove(QList<QString> { QStringLiteral("screen-001") });
+        remove.apply(data);
+        CHECK(data.objects.size() == 1 && data.objects.at(0).id == QStringLiteral("actor-001"),
+              "删除命令 apply 生效");
+        remove.revert(data);
+        CHECK(data == original, "删除命令 revert 后 FileData 逐字段还原（原位插回）");
+    }
+}
+
+// 阶段3：EditorCore 集成（命令提交回数据层 / 唯一名 / 剪贴板 / 选中剔除）
+// 注意：每次命令提交都整体替换 FileData，故只跨操作持有 id 副本，数据随用随取。
+void testEditorCore()
+{
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+
+    int emissions = 0;
+    QObject::connect(&runtime, &RuntimeData::fileDataChanged, &runtime, [&emissions] { ++emissions; });
+
+    // 创建演员：自动 id/唯一名/调色板色，落在指定位置并自动选中
+    CHECK(core.createObject(ObjectType::Actor, QPointF(100.0, 200.0)), "创建演员成功");
+    CHECK(runtime.fileData().objects.size() == 1, "创建经命令提交回数据层");
+    CHECK(emissions == 1, "commitFileData 发出 fileDataChanged");
+    {
+        const ObjectData actor = runtime.fileData().objects.at(0);
+        CHECK(actor.id == QStringLiteral("actor-001") && actor.name == QStringLiteral("角色1"),
+              "创建自动生成 id 与唯一名（角色1）");
+        CHECK(actor.transform.x == 100.0 && actor.transform.y == 200.0, "创建落在指定位置");
+        CHECK(actor.color == AppSettings::defaultPalette().first(), "创建取调色板第一个颜色");
+        CHECK(core.selection()->singleSelectedId() == actor.id, "创建后自动选中");
+    }
+    const QString actorId = runtime.fileData().objects.at(0).id;
+
+    // 创建屏风：默认尺寸、调色板轮转、名字不冲突
+    CHECK(core.createObject(ObjectType::Screen, QPointF(0.0, 0.0)), "创建屏风成功");
+    const QString screenId = runtime.fileData().objects.at(1).id;
+    {
+        const ObjectData screen = runtime.fileData().objects.at(1);
+        CHECK(screen.name == QStringLiteral("屏风1"), "屏风自动命名（屏风1）");
+        CHECK(screen.size && *screen.size == QSizeF(AppSettings::screenDefaultWidthCm,
+                                                    AppSettings::screenDefaultHeightCm),
+              "屏风默认尺寸取 AppSettings 常量");
+        CHECK(screen.color == AppSettings::defaultPalette().at(1), "调色板轮转取色");
+    }
+
+    // 道具占位：拒绝创建
+    CHECK(!core.createObject(ObjectType::Prop, QPointF(0.0, 0.0)), "道具创建被拒绝（占位禁用）");
+    CHECK(runtime.fileData().objects.size() == 2, "道具未进入数据");
+
+    // 名字唯一性（演员与屏风统一校验，排除自身）
+    CHECK(core.isNameTaken(QStringLiteral("角色1")), "重名检测命中");
+    CHECK(!core.isNameTaken(QStringLiteral("角色1"), actorId), "重名检测排除自身");
+    CHECK(!core.setObjectName(screenId, QStringLiteral("角色1")), "重名拒绝");
+    CHECK(!core.setObjectName(actorId, QStringLiteral("  ")), "空名拒绝");
+    CHECK(core.setObjectName(screenId, QStringLiteral("背景墙")), "合法改名生效");
+    CHECK(core.findObject(screenId)->name == QStringLiteral("背景墙"), "改名提交回数据层");
+
+    // 复制/粘贴：默认偏移 (x+20, y+20)、新 id、唯一名、粘贴后选中
+    core.selection()->select(actorId);
+    core.copySelection();
+    CHECK(core.clipboardHasContent(), "复制进内部剪贴板");
+    CHECK(core.pasteClipboard(), "粘贴成功（默认偏移）");
+    CHECK(runtime.fileData().objects.size() == 3, "粘贴经命令提交回数据层");
+    {
+        const ObjectData pasted = runtime.fileData().objects.at(2);
+        CHECK(pasted.id != actorId, "粘贴生成新 id");
+        CHECK(pasted.transform.x == 120.0 && pasted.transform.y == 220.0,
+              "粘贴默认偏移 (x+20, y+20)");
+        CHECK(pasted.name == QStringLiteral("角色2"), "粘贴生成唯一名（角色2）");
+        CHECK(core.selection()->singleSelectedId() == pasted.id, "粘贴后选中副本");
+    }
+
+    // 右键位置粘贴：落在指定点
+    CHECK(core.pasteClipboard(QPointF(-50.0, -60.0)), "右键位置粘贴成功");
+    {
+        const ObjectData pastedAt = runtime.fileData().objects.at(3);
+        CHECK(pastedAt.transform.x == -50.0 && pastedAt.transform.y == -60.0,
+              "右键粘贴落在鼠标位置");
+    }
+
+    // 方向键微调（moveSelectionBy：游标时刻语义——基准为当前时刻显示值，
+    // 游标处无关键帧 → 确认回调选"是"后打帧；10cm 语义由视口传入，这里验证命令路径）
+    core.selection()->select(actorId);
+    const int before = emissions;
+    CHECK(core.moveSelectionBy(QPointF(10.0, -10.0), [] { return true; }), "微调打帧提交");
+    const ObjectData* moved = core.findObject(actorId);
+    CHECK(moved->transform.x == 100.0 && moved->transform.y == 200.0,
+          "游标时刻语义：静态 transform 不变（打帧不改静态值）");
+    CHECK(moved->keyframes.size() == 1 && moved->keyframes.first().t == 0.0
+              && moved->keyframes.first().x == 110.0 && moved->keyframes.first().y == 190.0,
+          "微调结果落在游标（t=0）处的新关键帧（+10, -10）");
+    Transform movedDisplay;
+    CHECK(core.displayTransform(actorId, movedDisplay)
+              && movedDisplay.x == 110.0 && movedDisplay.y == 190.0,
+          "当前时刻显示值 = 新关键帧值");
+    CHECK(!core.moveSelectionBy(QPointF(0.0, 0.0), [] { return true; }),
+          "零位移（值等于显示值）判定为无变更，不提交");
+    CHECK(emissions == before + 1, "零位移不触发 fileDataChanged");
+
+    // 删除：选中态随 fileDataChanged 自动剔除
+    CHECK(core.deleteSelection(), "删除选中对象");
+    CHECK(runtime.fileData().objects.size() == 3 && core.findObject(actorId) == nullptr,
+          "删除提交回数据层");
+    CHECK(core.selection()->isEmpty(), "删除后选中态自动剔除");
+}
+
+// 阶段3.5：含分组嵌套的存档往返 + 旧存档（无 parent 字段）加载兼容
+void testParentGroupJson(QTemporaryDir& dir)
+{
+    // 分组 + 子对象 + 孙对象 + 顶层屏风，parentId 各不相同
+    FileData nested;
+    ObjectData group;
+    group.id = QStringLiteral("group-001");
+    group.type = ObjectType::Group;
+    group.name = QStringLiteral("第一幕组");
+    nested.objects.append(group);
+
+    ObjectData actor;
+    actor.id = QStringLiteral("actor-001");
+    actor.type = ObjectType::Actor;
+    actor.name = QStringLiteral("张三");
+    actor.parentId = QStringLiteral("group-001");
+    actor.color = QColor(QStringLiteral("#e74c3c"));
+    actor.transform = { 300.0, 200.0, 45.0 };
+    nested.objects.append(actor);
+
+    ObjectData screen;
+    screen.id = QStringLiteral("screen-001");
+    screen.type = ObjectType::Screen;
+    screen.name = QStringLiteral("屏风1");
+    screen.parentId = QStringLiteral("actor-001"); // 孙对象（挂在演员下）
+    screen.color = QColor(QStringLiteral("#888888"));
+    screen.size = QSizeF(100.0, 10.0);
+    screen.transform = { -150.0, 100.0, 90.0 };
+    nested.objects.append(screen);
+
+    const QString path = dir.filePath(QStringLiteral("nested.json"));
+    const SaveResult saveResult = JsonStore::save(path, nested);
+    CHECK(saveResult.ok, "保存含分组嵌套的存档：" + saveResult.message);
+    const LoadResult loadResult = JsonStore::load(path);
+    CHECK(loadResult.ok(), "读回含分组嵌套的存档：" + loadResult.message);
+    if (loadResult.ok()) {
+        CHECK(loadResult.data.objects == nested.objects,
+              "含 parent/group 的存档往返逐字段一致");
+        CHECK(loadResult.data == nested, "FileData 整体一致（含分组）");
+    }
+
+    // 写出始终包含 parent 字段与 group 类型字符串
+    const QJsonObject root = JsonStore::toJson(nested);
+    const QJsonArray writtenObjects = root.value(QStringLiteral("objects")).toArray();
+    CHECK(!writtenObjects.isEmpty()
+              && writtenObjects.first().toObject().contains(QStringLiteral("parent")),
+          "写出始终包含 parent 字段");
+    CHECK(writtenObjects.first().toObject().value(QStringLiteral("type"))
+                  .toString()
+              == QStringLiteral("group"),
+          "group 类型序列化为 \"group\"");
+
+    // 旧存档兼容：去掉所有 parent 字段后加载，全部视为顶层
+    QJsonArray legacyObjects = writtenObjects;
+    for (int i = 0; i < legacyObjects.size(); ++i) {
+        QJsonObject object = legacyObjects.at(i).toObject();
+        object.remove(QStringLiteral("parent"));
+        legacyObjects[i] = object;
+    }
+    QJsonObject legacy = root;
+    legacy[QStringLiteral("objects")] = legacyObjects;
+    const QString legacyPath = dir.filePath(QStringLiteral("legacy.json"));
+    writeTextFile(legacyPath, QJsonDocument(legacy).toJson());
+    const LoadResult legacyResult = JsonStore::load(legacyPath);
+    CHECK(legacyResult.ok(), "旧存档（无 parent 字段）加载兼容：" + legacyResult.message);
+    if (legacyResult.ok()) {
+        bool allTopLevel = true;
+        for (const ObjectData& object : legacyResult.data.objects)
+            allTopLevel = allTopLevel && object.parentId.isEmpty();
+        CHECK(allTopLevel, "parent 缺省视为顶层");
+        CHECK(legacyResult.data.objects.size() == nested.objects.size(),
+              "旧存档对象数量一致");
+    }
+
+    // parent 字段类型非法 → 严格校验报错而非崩溃
+    QJsonArray badObjects = writtenObjects;
+    QJsonObject badObject = badObjects.first().toObject();
+    badObject[QStringLiteral("parent")] = 42;
+    badObjects[0] = badObject;
+    QJsonObject bad = root;
+    bad[QStringLiteral("objects")] = badObjects;
+    const QString badPath = dir.filePath(QStringLiteral("badparent.json"));
+    writeTextFile(badPath, QJsonDocument(bad).toJson());
+    const LoadResult badResult = JsonStore::load(badPath);
+    CHECK(!badResult.ok() && badResult.error == LoadError::InvalidData,
+          "parent 字段类型非法返回 InvalidData");
+}
+
+// 阶段3.5：ReparentObjectsCommand apply/revert 往返（含排序变化）
+void testReparentCommand()
+{
+    // DFS 顺序：甲, 乙, 组1(丙, 大屏), 丁
+    FileData original;
+    ObjectData a1; a1.id = QStringLiteral("actor-001"); a1.type = ObjectType::Actor;
+    a1.name = QStringLiteral("甲"); a1.transform = { 100.0, 200.0, 0.0 };
+    ObjectData a2; a2.id = QStringLiteral("actor-002"); a2.type = ObjectType::Actor;
+    a2.name = QStringLiteral("乙"); a2.transform = { -100.0, 300.0, 0.0 };
+    ObjectData g; g.id = QStringLiteral("group-001"); g.type = ObjectType::Group;
+    g.name = QStringLiteral("组1");
+    ObjectData a3; a3.id = QStringLiteral("actor-003"); a3.type = ObjectType::Actor;
+    a3.name = QStringLiteral("丙"); a3.parentId = QStringLiteral("group-001");
+    a3.transform = { 50.0, 60.0, 0.0 };
+    ObjectData s; s.id = QStringLiteral("screen-001"); s.type = ObjectType::Screen;
+    s.name = QStringLiteral("大屏"); s.parentId = QStringLiteral("actor-003");
+    s.size = QSizeF(100.0, 10.0);
+    ObjectData a4; a4.id = QStringLiteral("actor-004"); a4.type = ObjectType::Actor;
+    a4.name = QStringLiteral("丁"); a4.transform = { 500.0, 500.0, 0.0 };
+    original.objects = { a1, a2, g, a3, s, a4 };
+
+    const auto idOrder = [](const FileData& data) {
+        QList<QString> order;
+        for (const ObjectData& object : data.objects)
+            order.append(object.id);
+        return order;
+    };
+
+    // 落到行上：甲 成为 组1 的子对象，排到子树末尾
+    {
+        FileData data = original;
+        ReparentObjectsCommand cmd({ QStringLiteral("actor-001") },
+                                   QStringLiteral("group-001"), 1);
+        cmd.apply(data);
+        CHECK(idOrder(data)
+                  == QList<QString>({ QStringLiteral("actor-002"), QStringLiteral("group-001"),
+                                      QStringLiteral("actor-003"), QStringLiteral("screen-001"),
+                                      QStringLiteral("actor-001"), QStringLiteral("actor-004") }),
+              "reparent 到行上：子对象排到该行子树末尾（DFS 顺序）");
+        CHECK(data.objects.at(4).parentId == QStringLiteral("group-001"),
+              "reparent 改写 parentId");
+        cmd.revert(data);
+        CHECK(data == original, "reparent revert 后 FileData 逐字段还原");
+        cmd.apply(data); // redo 幂等
+        CHECK(idOrder(data).at(4) == QStringLiteral("actor-001")
+                  && data.objects.at(4).parentId == QStringLiteral("group-001"),
+              "reparent 再次 apply（redo）结果一致");
+    }
+
+    // 顶层排序：丁 插到 乙 之前（Above）
+    {
+        FileData data = original;
+        ReparentObjectsCommand cmd({ QStringLiteral("actor-004") }, QString(), 1);
+        cmd.apply(data);
+        CHECK(idOrder(data)
+                  == QList<QString>({ QStringLiteral("actor-001"), QStringLiteral("actor-004"),
+                                      QStringLiteral("actor-002"), QStringLiteral("group-001"),
+                                      QStringLiteral("actor-003"), QStringLiteral("screen-001") }),
+              "reparent 到顶层行间：同级插入排序");
+        CHECK(data.objects.at(1).parentId.isEmpty(), "行间插入保持顶层 parentId 为空");
+        cmd.revert(data);
+        CHECK(data == original, "顶层排序 revert 还原");
+    }
+
+    // 整棵子树移出分组到顶层末尾（子树结构保持）
+    {
+        FileData data = original;
+        ReparentObjectsCommand cmd({ QStringLiteral("actor-003") }, QString(), 4);
+        cmd.apply(data);
+        CHECK(idOrder(data)
+                  == QList<QString>({ QStringLiteral("actor-001"), QStringLiteral("actor-002"),
+                                      QStringLiteral("group-001"), QStringLiteral("actor-004"),
+                                      QStringLiteral("actor-003"), QStringLiteral("screen-001") }),
+              "整棵子树移出分组到顶层末尾");
+        CHECK(data.objects.at(4).parentId.isEmpty(), "子树根改挂顶层");
+        CHECK(data.objects.at(5).parentId == QStringLiteral("actor-003"),
+              "子树内部结构保持（孙对象仍挂原父）");
+        cmd.revert(data);
+        CHECK(data == original, "子树移出 revert 还原");
+    }
+}
+
+// 阶段3.5：RemoveObjectsCommand 级联删除整棵子树，revert 原位还原
+void testCascadeRemove()
+{
+    FileData original;
+    ObjectData a1; a1.id = QStringLiteral("actor-001"); a1.type = ObjectType::Actor;
+    a1.name = QStringLiteral("甲");
+    ObjectData g; g.id = QStringLiteral("group-001"); g.type = ObjectType::Group;
+    g.name = QStringLiteral("组1");
+    ObjectData a2; a2.id = QStringLiteral("actor-002"); a2.type = ObjectType::Actor;
+    a2.name = QStringLiteral("乙"); a2.parentId = QStringLiteral("group-001");
+    ObjectData a3; a3.id = QStringLiteral("actor-003"); a3.type = ObjectType::Actor;
+    a3.name = QStringLiteral("丙"); a3.parentId = QStringLiteral("actor-002");
+    ObjectData a4; a4.id = QStringLiteral("actor-004"); a4.type = ObjectType::Actor;
+    a4.name = QStringLiteral("丁");
+    original.objects = { a1, g, a2, a3, a4 };
+
+    // 删除分组：级联删整棵子树（组1 + 乙 + 丙）
+    {
+        FileData data = original;
+        RemoveObjectsCommand remove({ QStringLiteral("group-001") });
+        remove.apply(data);
+        CHECK(data.objects.size() == 2
+                  && data.objects.at(0).id == QStringLiteral("actor-001")
+                  && data.objects.at(1).id == QStringLiteral("actor-004"),
+              "删除分组级联删除整棵子树");
+        remove.revert(data);
+        CHECK(data == original, "级联删除 revert 整棵子树还原（原位插回）");
+    }
+
+    // 删除中间节点：乙 + 其子 丙 级联
+    {
+        FileData data = original;
+        RemoveObjectsCommand remove({ QStringLiteral("actor-002") });
+        remove.apply(data);
+        CHECK(data.objects.size() == 3
+                  && !data.objects.at(1).id.contains(QStringLiteral("actor-002")),
+              "删除中间节点级联其子对象");
+        remove.revert(data);
+        CHECK(data == original, "中间节点级联删除 revert 还原");
+    }
+
+    // 多选含祖先与后代：只删一次不重复
+    {
+        FileData data = original;
+        RemoveObjectsCommand remove(
+            { QStringLiteral("group-001"), QStringLiteral("actor-003") });
+        remove.apply(data);
+        CHECK(data.objects.size() == 2, "多选含祖先后代时级联去重");
+        remove.revert(data);
+        CHECK(data == original, "多选级联 revert 还原");
+    }
+}
+
+// 阶段3.5：EditorCore 空对象创建 / reparent 校验 / 子树复制粘贴
+void testEditorCoreGroupReparent()
+{
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+
+    // ---- 空对象创建：自动命名/唯一性/顶层/无颜色大小/忽略位置 ----
+    CHECK(core.createObject(ObjectType::Group, QPointF(123.0, 456.0)), "创建空对象成功");
+    const QString group1 = runtime.fileData().objects.at(0).id;
+    {
+        const ObjectData object = runtime.fileData().objects.at(0);
+        CHECK(object.id == QStringLiteral("group-001") && object.name == QStringLiteral("空对象1"),
+              "空对象自动 id 与命名（空对象1）");
+        CHECK(object.parentId.isEmpty(), "空对象创建落在顶层");
+        CHECK(!object.color.isValid() && !object.size, "空对象无颜色/大小属性");
+        CHECK(object.transform == Transform({ 0.0, 0.0, 0.0 }),
+              "空对象忽略传入位置，transform 保留默认值");
+        CHECK(core.selection()->singleSelectedId() == object.id, "创建空对象后自动选中");
+    }
+    CHECK(core.createObject(ObjectType::Group, QPointF(0.0, 0.0)), "创建第二个空对象");
+    CHECK(runtime.fileData().objects.at(1).name == QStringLiteral("空对象2")
+              && runtime.fileData().objects.at(1).id == QStringLiteral("group-002"),
+          "空对象命名唯一性（空对象2）");
+    const QString group2 = runtime.fileData().objects.at(1).id;
+
+    // 空对象改名走同一路径（重名拒绝照旧）
+    CHECK(!core.setObjectName(group1, QStringLiteral("空对象2")), "空对象重名拒绝");
+    CHECK(core.setObjectName(group1, QStringLiteral("第一幕布景组")), "空对象改名生效");
+
+    // ---- reparent：拖入分组 / 环校验 ----
+    CHECK(core.createObject(ObjectType::Actor, QPointF(100.0, 100.0)), "创建演员");
+    const QString actor1 = runtime.fileData().objects.at(2).id;
+    CHECK(core.reparent({ actor1 }, group1, 0), "拖入分组成功");
+    CHECK(core.findObject(actor1)->parentId == group1, "reparent 落数据 parentId");
+    {
+        // DFS 不变式：子对象紧跟父的子树区间 → [组1, 角色1, 空对象2]
+        const QList<QString> order = { group1, actor1, group2 };
+        QList<QString> actual;
+        for (const ObjectData& object : runtime.fileData().objects)
+            actual.append(object.id);
+        CHECK(actual == order, "reparent 后列表顺序 = DFS 显示顺序");
+    }
+    CHECK(!core.reparent({ group1 }, actor1, 0), "环拖拽被拒绝（拖到自身后代之下）");
+    CHECK(!core.reparent({ group1 }, group1, 0), "环拖拽被拒绝（拖到自身）");
+    CHECK(!core.reparent({ group1 }, QStringLiteral("ghost-001"), 0), "父不存在拒绝");
+    CHECK(!core.reparent({ QStringLiteral("ghost-001") }, group1, 0), "移动对象不存在拒绝");
+    CHECK(core.findObject(group1)->parentId.isEmpty()
+              && core.findObject(actor1)->parentId == group1,
+          "拒绝的 reparent 不产生任何变更");
+
+    // Prop 不出现：注入一个道具对象，双向拒绝
+    {
+        FileData injected = runtime.fileData();
+        ObjectData prop;
+        prop.id = QStringLiteral("prop-001");
+        prop.type = ObjectType::Prop;
+        prop.name = QStringLiteral("道具1");
+        injected.objects.append(prop);
+        runtime.commitFileData(injected);
+        CHECK(!core.reparent({ QStringLiteral("prop-001") }, group1, 0), "Prop 拖动被拒绝");
+        CHECK(!core.reparent({ actor1 }, QStringLiteral("prop-001"), 0), "拖到 Prop 之下被拒绝");
+        FileData cleaned = runtime.fileData();
+        cleaned.objects.removeLast();
+        runtime.commitFileData(cleaned);
+    }
+
+    // ---- 子树复制/粘贴：整棵子树、新 id、名字唯一化、结构保持、粘贴到顶层 ----
+    core.selection()->select(group1); // 组1 含 角色1
+    core.copySelection();
+    CHECK(core.pasteClipboard(), "粘贴分组子树成功");
+    CHECK(runtime.fileData().objects.size() == 5, "整棵子树一起粘贴");
+    {
+        const ObjectData& pastedGroup = runtime.fileData().objects.at(3);
+        const ObjectData& pastedActor = runtime.fileData().objects.at(4);
+        CHECK(pastedGroup.type == ObjectType::Group
+                  && pastedGroup.id != group1
+                  && pastedGroup.parentId.isEmpty(),
+              "粘贴的分组生成新 id 且落在顶层");
+        CHECK(pastedActor.parentId == pastedGroup.id, "粘贴保持子树结构");
+        CHECK(pastedActor.transform.x == 100.0 && pastedActor.transform.y == 100.0,
+              "子对象保持绝对场景坐标（无偏移）");
+        CHECK(pastedGroup.name == QStringLiteral("第一幕布景组2")
+                  && pastedActor.name == QStringLiteral("角色2"),
+              "粘贴名字唯一化");
+        CHECK(core.selection()->selectedIds().contains(pastedGroup.id)
+                  && core.selection()->selectedIds().contains(pastedActor.id),
+              "粘贴后选中整棵副本");
+    }
+
+    // 单独复制子对象：粘贴后落顶层并偏移
+    core.selection()->select(actor1);
+    core.copySelection();
+    CHECK(core.pasteClipboard(), "单独粘贴子对象成功");
+    {
+        const ObjectData& pasted = runtime.fileData().objects.last();
+        CHECK(pasted.parentId.isEmpty(), "单独复制的子对象粘贴到顶层");
+        CHECK(pasted.transform.x == 120.0 && pasted.transform.y == 120.0,
+              "顶层粘贴偏移 (x+20, y+20)");
+    }
+
+    // ---- 删除分组级联（走 EditorCore 命令路径）----
+    core.selection()->select(group1);
+    CHECK(core.deleteSelection(), "删除分组");
+    CHECK(core.findObject(group1) == nullptr && core.findObject(actor1) == nullptr,
+          "删除分组级联删除子对象（数据层）");
+    CHECK(core.selection()->isEmpty(), "级联删除后选中态剔除");
+}
+
+// 阶段4：UndoStack 基础行为（入栈/撤销/重做往返、无变更不入栈、
+// 新命令清空 redo 区、新建/打开文件清栈、fileReplaced 信号时机）
+void testUndoStack(QTemporaryDir& dir)
+{
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+
+    int stackSignals = 0;
+    QObject::connect(&core, &EditorCore::undoStackChanged, &core, [&stackSignals] { ++stackSignals; });
+    int replaced = 0;
+    QObject::connect(&runtime, &RuntimeData::fileReplaced, &runtime, [&replaced] { ++replaced; });
+
+    // ---- 基础往返 ----
+    CHECK(!core.canUndo() && !core.canRedo(), "撤销栈初始为空");
+    CHECK(!core.undo() && !core.redo(), "空栈 undo/redo 返回 false");
+    CHECK(core.createObject(ObjectType::Actor, QPointF(10.0, 20.0)), "创建演员（入栈）");
+    const FileData afterCreate = runtime.fileData();
+    CHECK(core.canUndo() && !core.canRedo(), "入栈后可撤销、不可重做");
+    CHECK(stackSignals == 1, "入栈发出一次 undoStackChanged");
+
+    CHECK(core.undo(), "撤销创建成功");
+    CHECK(runtime.fileData().objects.isEmpty(), "撤销后对象移除");
+    CHECK(!core.canUndo() && core.canRedo(), "撤销到底后不可撤销、可重做");
+    CHECK(core.redo(), "重做创建成功");
+    CHECK(runtime.fileData() == afterCreate, "重做后 FileData 逐字段还原");
+    CHECK(core.canUndo() && !core.canRedo(), "重做后可再次撤销");
+
+    // ---- 无变更命令不入栈 ----
+    core.selection()->select(QStringLiteral("actor-001"));
+    const int signalsBefore = stackSignals;
+    CHECK(!core.moveSelectionBy(QPointF(0.0, 0.0), [] { return true; }), "零位移判定为无变更");
+    CHECK(stackSignals == signalsBefore, "无变更命令不发栈信号");
+    core.undo(); // 撤销掉创建：undo 区空、redo 区有"创建"
+    CHECK(!core.canUndo() && core.canRedo(), "无变更命令不入栈（栈状态不受影响）");
+
+    // ---- 新命令清空 redo 区 ----
+    CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "新命令入栈（redo 区应清空）");
+    CHECK(!core.canRedo(), "新命令清空 redo 区");
+    CHECK(core.canUndo(), "新命令后可撤销");
+
+    // ---- 新建文件清空栈 ----
+    CHECK(replaced == 0, "此前无 fileReplaced（commit 不触发）");
+    runtime.newFile();
+    CHECK(replaced == 1, "newFile 发出 fileReplaced");
+    CHECK(!core.canUndo() && !core.canRedo(), "newFile 清空撤销栈");
+    CHECK(stackSignals > signalsBefore, "清栈发出 undoStackChanged");
+
+    // ---- 打开文件清空栈（成功才发信号；saveFile 不发）----
+    CHECK(core.createObject(ObjectType::Screen, QPointF(0.0, 0.0)), "打开前再造一条命令");
+    CHECK(core.canUndo(), "打开前栈非空");
+    const QString path = dir.filePath(QStringLiteral("undo-open.json"));
+    CHECK(JsonStore::save(path, makeSampleData()).ok, "UndoStack 测试准备：写入示例存档");
+    const LoadResult openResult = runtime.openFile(path);
+    CHECK(openResult.ok(), "openFile 成功");
+    CHECK(replaced == 2, "openFile 成功发出 fileReplaced");
+    CHECK(!core.canUndo() && !core.canRedo(), "openFile 清空撤销栈");
+
+    CHECK(core.createObject(ObjectType::Actor, QPointF(1.0, 1.0)), "打开后再造一条命令");
+    const QString missingPath = dir.filePath(QStringLiteral("undo-missing.json"));
+    CHECK(!runtime.openFile(missingPath).ok(), "openFile 失败");
+    CHECK(replaced == 2, "openFile 失败不发 fileReplaced");
+    CHECK(core.canUndo(), "openFile 失败不清空撤销栈");
+
+    const SaveResult saveResult = runtime.saveFile(dir.filePath(QStringLiteral("undo-save.json")),
+                                                   runtime.fileData());
+    CHECK(saveResult.ok, "saveFile 成功");
+    CHECK(replaced == 2, "saveFile 不发 fileReplaced");
+    CHECK(core.canUndo(), "saveFile 不清空撤销栈");
+}
+
+// 阶段4 验收硬性要求：20 步确定性操作序列（覆盖移动/旋转/创建/删除/粘贴/改名/
+// reparent/改颜色/改屏风大小），每步记录 FileData 快照；随后逐级撤销，每级断言
+// FileData 与上一快照逐字段相等，直到回到初始状态；再逐级重做，每级与快照一致。
+void testUndoRedoSequence()
+{
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+
+    QList<FileData> snapshots;
+    snapshots.append(runtime.fileData()); // 快照0：初始状态（新建默认空舞台）
+
+    const auto step = [&runtime, &snapshots](bool ok, const QString& name) {
+        CHECK(ok, QStringLiteral("序列 %1：命令提交成功").arg(name));
+        snapshots.append(runtime.fileData());
+    };
+    // 游标时刻语义下取"当前显示值"作为旋转等新绝对值的基准（阶段5 起 transform 为静态值）
+    const auto displayOf = [&core](const QString& id) {
+        Transform value;
+        core.displayTransform(id, value);
+        return value;
+    };
+    const auto confirmYes = [] { return true; };
+
+    // 1~3：创建 演员/屏风/演员
+    step(core.createObject(ObjectType::Actor, QPointF(100.0, 100.0)), QStringLiteral("1 创建演员"));
+    const QString actor1 = QStringLiteral("actor-001");
+    step(core.createObject(ObjectType::Screen, QPointF(-300.0, 0.0)), QStringLiteral("2 创建屏风"));
+    const QString screen1 = QStringLiteral("screen-001");
+    step(core.createObject(ObjectType::Actor, QPointF(200.0, -100.0)), QStringLiteral("3 创建演员2"));
+    const QString actor2 = QStringLiteral("actor-002");
+
+    // 4~5：移动 / 旋转
+    core.selection()->select(actor1);
+    step(core.moveSelectionBy(QPointF(30.0, -20.0), confirmYes), QStringLiteral("4 移动"));
+    step(core.setTransformsAtCursor(
+             { { actor2, { displayOf(actor2).x, displayOf(actor2).y, 90.0 } } }, confirmYes),
+         QStringLiteral("5 旋转"));
+
+    // 6~8：改名 / 改颜色 / 改屏风大小
+    step(core.setObjectName(actor1, QStringLiteral("主角")), QStringLiteral("6 改名"));
+    step(core.setObjectColor(actor2, QColor(QStringLiteral("#123456"))), QStringLiteral("7 改颜色"));
+    step(core.setScreenSize(screen1, QSizeF(250.0, 12.0)), QStringLiteral("8 改屏风大小"));
+
+    // 9~10：复制粘贴 / 创建空对象
+    core.selection()->select(actor1);
+    core.copySelection();
+    step(core.pasteClipboard(), QStringLiteral("9 粘贴"));
+    step(core.createObject(ObjectType::Group, QPointF(0.0, 0.0)), QStringLiteral("10 创建空对象"));
+    const QString group1 = QStringLiteral("group-001");
+
+    // 11~12：reparent 拖入分组
+    step(core.reparent({ actor1 }, group1, 0), QStringLiteral("11 reparent 入组"));
+    step(core.reparent({ actor2 }, group1, 1), QStringLiteral("12 reparent 入组2"));
+
+    // 13~15：删除副本 / 移动屏风 / 旋转屏风
+    core.selection()->select(QStringLiteral("actor-003"));
+    step(core.deleteSelection(), QStringLiteral("13 删除粘贴副本"));
+    core.selection()->select(screen1);
+    step(core.moveSelectionBy(QPointF(0.0, 40.0), confirmYes), QStringLiteral("14 移动屏风"));
+    step(core.setTransformsAtCursor(
+             { { screen1, { displayOf(screen1).x, displayOf(screen1).y, 45.0 } } }, confirmYes),
+         QStringLiteral("15 旋转屏风"));
+
+    // 16~18：再次粘贴 / 屏风改名 / reparent 移出分组到顶层
+    step(core.pasteClipboard(), QStringLiteral("16 再次粘贴"));
+    step(core.setObjectName(screen1, QStringLiteral("背景墙")), QStringLiteral("17 屏风改名"));
+    step(core.reparent({ actor2 }, QString(), 0), QStringLiteral("18 reparent 移出分组"));
+
+    // 19~20：删除分组级联 / 移动收尾
+    core.selection()->select(group1);
+    step(core.deleteSelection(), QStringLiteral("19 删除分组级联"));
+    core.selection()->select(screen1);
+    step(core.moveSelectionBy(QPointF(-15.0, 5.0), confirmYes), QStringLiteral("20 移动收尾"));
+
+    CHECK(snapshots.size() == 21, "20 步序列共 21 份快照（含初始）");
+
+    // 逐级撤销：第 i 步撤销后必须逐字段等于快照 i-1
+    for (int i = 20; i >= 1; --i) {
+        CHECK(core.canUndo(), QStringLiteral("撤销第 %1 步前可撤销").arg(i));
+        CHECK(core.undo(), QStringLiteral("撤销第 %1 步返回 true").arg(i));
+        CHECK(runtime.fileData() == snapshots.at(i - 1),
+              QStringLiteral("撤销第 %1 步后 FileData 与快照 %2 逐字段一致").arg(i).arg(i - 1));
+    }
+    CHECK(!core.canUndo() && core.canRedo(), "撤销到底：回到初始状态， redo 区完整");
+    CHECK(!core.undo(), "撤销到底后继续撤销返回 false");
+
+    // 逐级重做：第 i 步重做后必须逐字段等于快照 i
+    for (int i = 1; i <= 20; ++i) {
+        CHECK(core.canRedo(), QStringLiteral("重做第 %1 步前可重做").arg(i));
+        CHECK(core.redo(), QStringLiteral("重做第 %1 步返回 true").arg(i));
+        CHECK(runtime.fileData() == snapshots.at(i),
+              QStringLiteral("重做第 %1 步后 FileData 与快照一致").arg(i));
+    }
+    CHECK(!core.canRedo() && core.canUndo(), "重做到底：redo 区清空，撤销栈完整");
+    CHECK(!core.redo(), "重做到底后继续重做返回 false");
+}
+
+// 阶段5：关键帧插值纯函数（位置直线匀速、朝向最短弧匀速、首前/末后保持、
+// 无关键帧用静态值、单帧任意时刻等于该帧、乱序输入防御）
+void testInterpolation()
+{
+    ObjectData object;
+    object.id = QStringLiteral("actor-x");
+    object.type = ObjectType::Actor;
+    object.transform = { 7.0, 8.0, 9.0 };
+
+    // 无关键帧 → 静态 transform
+    CHECK(TimelinePlayer::interpolate(object, 3.0) == Transform({ 7.0, 8.0, 9.0 }),
+          "插值：无关键帧用静态值");
+
+    // 两帧：中点位置直线匀速、朝向线性
+    object.keyframes = { { 0.0, 0.0, 0.0, 0.0 }, { 10.0, 100.0, 200.0, 40.0 } };
+    CHECK(TimelinePlayer::interpolate(object, 5.0) == Transform({ 50.0, 100.0, 20.0 }),
+          "插值：两帧中点位置直线匀速");
+    CHECK(TimelinePlayer::interpolate(object, -1.0) == Transform({ 0.0, 0.0, 0.0 }),
+          "插值：首帧前保持首帧值");
+    CHECK(TimelinePlayer::interpolate(object, 11.0) == Transform({ 100.0, 200.0, 40.0 }),
+          "插值：末帧后保持末帧值");
+    CHECK(TimelinePlayer::interpolate(object, 10.0) == Transform({ 100.0, 200.0, 40.0 }),
+          "插值：时刻恰在关键帧上取该帧");
+
+    // 最短弧：350°→10° 走 +20°（而非 -340°）
+    object.keyframes = { { 0.0, 0.0, 0.0, 350.0 }, { 10.0, 0.0, 0.0, 10.0 } };
+    CHECK(TimelinePlayer::interpolate(object, 2.5).rotation == 355.0,
+          "插值：最短弧 350°→10° 经 355°");
+    CHECK(TimelinePlayer::interpolate(object, 5.0).rotation == 0.0,
+          "插值：最短弧中点跨过 360° 归一化为 0°");
+    // 反向最短弧：100°→340° 走 -120°
+    object.keyframes = { { 0.0, 0.0, 0.0, 100.0 }, { 10.0, 0.0, 0.0, 340.0 } };
+    CHECK(TimelinePlayer::interpolate(object, 5.0).rotation == 40.0,
+          "插值：最短弧 100°→340° 中点 40°（走 -120°）");
+
+    // 单帧任意时刻等于该帧
+    object.keyframes = { { 3.0, 50.0, 60.0, 30.0 } };
+    CHECK(TimelinePlayer::interpolate(object, 0.0) == Transform({ 50.0, 60.0, 30.0 })
+              && TimelinePlayer::interpolate(object, 99.0) == Transform({ 50.0, 60.0, 30.0 }),
+          "插值：单帧任意时刻等于该帧");
+
+    // 乱序输入防御（手工编辑的存档）：排序后插值
+    object.keyframes = { { 10.0, 100.0, 200.0, 40.0 }, { 0.0, 0.0, 0.0, 0.0 } };
+    CHECK(TimelinePlayer::interpolate(object, 5.0) == Transform({ 50.0, 100.0, 20.0 }),
+          "插值：乱序关键帧列表防御性排序");
+}
+
+// 阶段5：时间轴命令 apply/revert 往返（upsert 插入/更新/批量、删除、改时刻、
+// 标签添加/改名/删除、时长自动延长及撤销还原）
+void testKeyframeCommands()
+{
+    const FileData original = makeSampleData(); // actor-001 帧 @2/5.5/9，时长 90.5，2 标签
+
+    // upsert 插入：保持按 t 有序
+    {
+        FileData data = original;
+        UpsertKeyframesCommand cmd({ { QStringLiteral("actor-001"), { 4.0, 1.0, 2.0, 3.0 } } });
+        cmd.apply(data);
+        const QList<Keyframe>& keys = data.objects.at(0).keyframes;
+        CHECK(keys.size() == 4 && keys.at(1).t == 4.0 && keys.at(1).x == 1.0,
+              "upsert 插入并保持按 t 有序");
+        CHECK(data.timeline.duration == 90.5, "落点在时长内不延长");
+        cmd.revert(data);
+        CHECK(data == original, "upsert 插入 revert 还原");
+        cmd.apply(data); // redo 幂等
+        CHECK(data.objects.at(0).keyframes.size() == 4, "upsert redo 幂等");
+    }
+
+    // upsert 更新：T 处已有帧 → 更新不新增
+    {
+        FileData data = original;
+        UpsertKeyframesCommand cmd({ { QStringLiteral("actor-001"), { 2.0, 9.0, 9.0, 9.0 } } });
+        cmd.apply(data);
+        const QList<Keyframe>& keys = data.objects.at(0).keyframes;
+        CHECK(keys.size() == 3 && keys.at(0) == Keyframe({ 2.0, 9.0, 9.0, 9.0 }),
+              "upsert 更新 T 处已有帧（不新增）");
+        cmd.revert(data);
+        CHECK(data == original, "upsert 更新 revert 还原");
+    }
+
+    // 批量 upsert 一条命令（多对象 = 一步撤销）
+    {
+        FileData data = original;
+        UpsertKeyframesCommand cmd(
+            { { QStringLiteral("actor-001"), { 2.0, 1.0, 1.0, 1.0 } },
+              { QStringLiteral("screen-001"), { 1.0, 2.0, 2.0, 2.0 } } });
+        cmd.apply(data);
+        CHECK(data.objects.at(0).keyframes.at(0).x == 1.0
+                  && data.objects.at(1).keyframes.at(0).x == 2.0,
+              "批量 upsert 同时作用于多对象");
+        cmd.revert(data);
+        CHECK(data == original, "批量 upsert revert 一并还原");
+    }
+
+    // 删除（含 revert 还原）
+    {
+        FileData data = original;
+        RemoveKeyframesCommand cmd({ { QStringLiteral("actor-001"), 5.5 } });
+        cmd.apply(data);
+        const QList<Keyframe>& keys = data.objects.at(0).keyframes;
+        CHECK(keys.size() == 2 && keys.at(0).t == 2.0 && keys.at(1).t == 9.0,
+              "删除关键帧 apply 生效");
+        CHECK(data.timeline.duration == 90.5, "删除不收缩时长");
+        cmd.revert(data);
+        CHECK(data == original, "删除关键帧 revert 还原");
+    }
+
+    // 改时刻：t 变化值不变；目标时刻已有帧被覆盖
+    {
+        FileData data = original;
+        MoveKeyframeCommand cmd(QStringLiteral("actor-001"), 5.5, 4.0);
+        cmd.apply(data);
+        const QList<Keyframe>& keys = data.objects.at(0).keyframes;
+        CHECK(keys.size() == 3 && keys.at(1).t == 4.0
+                  && keys.at(1) == Keyframe({ 4.0, 400.0, 250.0, 90.0 }),
+              "改时刻 apply：t 变化值不变且保持有序");
+        cmd.revert(data);
+        CHECK(data == original, "改时刻 revert 还原");
+    }
+    {
+        FileData data = original;
+        MoveKeyframeCommand cmd(QStringLiteral("actor-001"), 5.5, 2.0);
+        cmd.apply(data);
+        const QList<Keyframe>& keys = data.objects.at(0).keyframes;
+        CHECK(keys.size() == 2 && keys.at(0) == Keyframe({ 2.0, 400.0, 250.0, 90.0 }),
+              "改时刻覆盖目标时刻已有帧");
+        cmd.revert(data);
+        CHECK(data == original, "改时刻覆盖 revert 还原双方");
+    }
+
+    // 时长自动延长及撤销还原
+    {
+        FileData data = original;
+        UpsertKeyframesCommand cmd({ { QStringLiteral("actor-001"), { 95.0, 0.0, 0.0, 0.0 } } });
+        cmd.apply(data);
+        CHECK(data.timeline.duration == 95.0, "关键帧超出时长自动延长");
+        cmd.revert(data);
+        CHECK(data == original, "时长延长随命令 revert 一并还原");
+    }
+
+    // 场次标签：添加（有序）/改名/删除往返
+    {
+        FileData data = original;
+        AddSceneLabelCommand add(SceneLabel { 20.0, QStringLiteral("间幕") });
+        add.apply(data);
+        CHECK(data.timeline.labels.size() == 3
+                  && data.timeline.labels.at(1).name == QStringLiteral("间幕"),
+              "添加场次标签并按 t 有序插入");
+        add.revert(data);
+        CHECK(data == original, "添加标签 revert 还原");
+
+        AddSceneLabelCommand addBeyond(SceneLabel { 100.0, QStringLiteral("加幕") });
+        addBeyond.apply(data);
+        CHECK(data.timeline.duration == 100.0, "标签超出时长自动延长");
+        addBeyond.revert(data);
+        CHECK(data == original, "标签延长 revert 还原");
+
+        RenameSceneLabelCommand rename(0, QStringLiteral("序幕"));
+        rename.apply(data);
+        CHECK(data.timeline.labels.at(0).name == QStringLiteral("序幕"), "标签改名 apply");
+        rename.revert(data);
+        CHECK(data == original, "标签改名 revert 还原");
+
+        RemoveSceneLabelCommand remove(1);
+        remove.apply(data);
+        CHECK(data.timeline.labels.size() == 1
+                  && data.timeline.labels.at(0).name == QStringLiteral("第一幕"),
+              "删除标签 apply");
+        remove.revert(data);
+        CHECK(data == original, "删除标签 revert 还原");
+    }
+}
+
+// 时间轴交互完善：批量改时刻（MoveKeyframesCommand）、标签移动
+// （MoveSceneLabelCommand）、EditorCore 关键帧级剪贴板往返
+void testTimelineElementEditing()
+{
+    const FileData original = makeSampleData(); // actor-001 帧 @2/5.5/9，screen-001 帧 @1/7.25，时长 90.5，标签 @0/@45.25
+
+    // 批量改时刻：多对象统一平移，一条命令一步撤销
+    {
+        FileData data = original;
+        MoveKeyframesCommand cmd({ { QStringLiteral("actor-001"), 2.0 },
+                                   { QStringLiteral("screen-001"), 1.0 } },
+                                 1.5);
+        cmd.apply(data);
+        CHECK(data.objects.at(0).keyframes.at(0).t == 3.5
+                  && data.objects.at(1).keyframes.at(0).t == 2.5,
+              "批量改时刻：多对象统一平移");
+        cmd.revert(data);
+        CHECK(data == original, "批量改时刻 revert 还原");
+        cmd.apply(data); // redo 幂等
+        CHECK(data.objects.at(0).keyframes.at(0).t == 3.5, "批量改时刻 redo 幂等");
+        cmd.revert(data);
+    }
+
+    // 目标时刻已有帧按 upsert 覆盖（5.5 → 2.0 覆盖原 @2 帧）
+    {
+        FileData data = original;
+        MoveKeyframesCommand cmd({ { QStringLiteral("actor-001"), 5.5 } }, -3.5);
+        cmd.apply(data);
+        const QList<Keyframe>& keys = data.objects.at(0).keyframes;
+        CHECK(keys.size() == 2 && keys.at(0) == Keyframe({ 2.0, 400.0, 250.0, 90.0 })
+                  && keys.at(1).t == 9.0,
+              "批量改时刻：覆盖目标时刻已有帧");
+        cmd.revert(data);
+        CHECK(data == original, "批量改时刻覆盖 revert 还原双方");
+    }
+
+    // 逐帧 clamp t≥0：大负 delta 钳到 0
+    {
+        FileData data = original;
+        MoveKeyframesCommand cmd({ { QStringLiteral("actor-001"), 2.0 },
+                                   { QStringLiteral("screen-001"), 1.0 } },
+                                 -10.0);
+        cmd.apply(data);
+        CHECK(data.objects.at(0).keyframes.first().t == 0.0
+                  && data.objects.at(1).keyframes.first().t == 0.0,
+              "批量改时刻：逐帧 clamp t≥0");
+        cmd.revert(data);
+        CHECK(data == original, "clamp revert 还原");
+    }
+
+    // 同批两帧钳到同一时刻：按列表顺序后者覆盖前者（@5.5 的帧覆盖 @2 的帧）
+    {
+        FileData data = original;
+        MoveKeyframesCommand cmd({ { QStringLiteral("actor-001"), 2.0 },
+                                   { QStringLiteral("actor-001"), 5.5 } },
+                                 -10.0);
+        cmd.apply(data);
+        const QList<Keyframe>& keys = data.objects.at(0).keyframes;
+        CHECK(keys.size() == 2 && keys.at(0) == Keyframe({ 0.0, 400.0, 250.0, 90.0 })
+                  && keys.at(1).t == 9.0,
+              "批量改时刻：同批钳到同一时刻后者覆盖前者");
+        cmd.revert(data);
+        CHECK(data == original, "同批覆盖 revert 还原");
+    }
+
+    // 时长自动延长（沿用命令内部 ensureDuration）及撤销还原
+    {
+        FileData data = original;
+        MoveKeyframesCommand cmd({ { QStringLiteral("actor-001"), 9.0 } }, 95.0);
+        cmd.apply(data);
+        CHECK(data.objects.at(0).keyframes.last().t == 104.0
+                  && data.timeline.duration == 104.0,
+              "批量改时刻：时长自动延长");
+        cmd.revert(data);
+        CHECK(data == original, "时长延长 revert 一并还原");
+    }
+
+    // 标签移动：按下标改 t、名不变、按 t 重排；时长自动延长
+    {
+        FileData data = original;
+        MoveSceneLabelCommand cmd(0, 50.0);
+        cmd.apply(data);
+        CHECK(data.timeline.labels.size() == 2
+                  && data.timeline.labels.at(0).name == QStringLiteral("第二幕")
+                  && data.timeline.labels.at(1)
+                         == SceneLabel({ 50.0, QStringLiteral("第一幕") }),
+              "标签移动：改时刻后按 t 重排且名不变");
+        cmd.revert(data);
+        CHECK(data == original, "标签移动 revert 还原");
+        cmd.apply(data); // redo 幂等（下标在 apply/revert 间稳定）
+        CHECK(data.timeline.labels.at(1).t == 50.0, "标签移动 redo 幂等");
+        cmd.revert(data);
+    }
+    {
+        FileData data = original;
+        MoveSceneLabelCommand cmd(1, 95.5);
+        cmd.apply(data);
+        CHECK(data.timeline.duration == 95.5, "标签移出时长自动延长");
+        cmd.revert(data);
+        CHECK(data == original, "标签移动时长 revert 还原");
+    }
+
+    // EditorCore 入口：无变更不入栈 / 空集拒绝
+    {
+        RuntimeData runtime;
+        EditorCore core(&runtime);
+        runtime.commitFileData(original);
+        CHECK(!core.moveSceneLabel(0, 0.0), "moveSceneLabel 无变更不入栈");
+        CHECK(core.moveSceneLabel(0, 10.0), "moveSceneLabel 生效");
+        CHECK(runtime.fileData().timeline.labels.at(0)
+                  == SceneLabel({ 10.0, QStringLiteral("第一幕") }),
+              "moveSceneLabel 改时刻且重排");
+        CHECK(core.undo() && runtime.fileData() == original, "moveSceneLabel 撤销还原");
+        CHECK(!core.moveKeyframes({}, 1.0), "moveKeyframes 空集拒绝");
+    }
+
+    // 关键帧级剪贴板（EditorCore 持有，独立于对象剪贴板）
+    {
+        RuntimeData runtime;
+        EditorCore core(&runtime);
+        CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "关键帧剪贴板：创建演员");
+        const QString id = QStringLiteral("actor-001");
+        CHECK(core.upsertKeyframe(id, { 1.0, 10.0, 10.0, 0.0 }), "关键帧剪贴板：打帧 @1");
+        CHECK(core.upsertKeyframe(id, { 3.0, 30.0, 30.0, 90.0 }), "关键帧剪贴板：打帧 @3");
+
+        CHECK(!core.keyframeClipboardHasContent(), "关键帧剪贴板初始为空");
+        core.copySelectedKeyframes({ { id, 1.0 }, { id, 3.0 } });
+        CHECK(core.keyframeClipboardHasContent(), "复制选中关键帧进关键帧剪贴板");
+        CHECK(!core.clipboardHasContent(), "关键帧复制不触碰对象剪贴板");
+
+        // 游标处粘贴：复制集最小 t(=1) 对齐游标 5 → 落 @5/@7，保持相对间隔
+        core.timelinePlayer()->seekTo(5.0);
+        CHECK(core.pasteKeyframesAtCursor(), "游标处粘贴关键帧");
+        const QList<Keyframe>& keys = core.findObject(id)->keyframes;
+        CHECK(keys.size() == 4 && keys.at(2) == Keyframe({ 5.0, 10.0, 10.0, 0.0 })
+                  && keys.at(3) == Keyframe({ 7.0, 30.0, 30.0, 90.0 }),
+              "粘贴保持相对间隔（最小 t 对齐游标）");
+        CHECK(core.undo() && core.findObject(id)->keyframes.size() == 2, "撤销粘贴还原");
+        CHECK(core.redo() && core.findObject(id)->keyframes.size() == 4, "重做粘贴");
+
+        // upsert 覆盖：游标 3 → delta=2 → @3 被覆盖为复制值
+        core.timelinePlayer()->seekTo(3.0);
+        CHECK(core.pasteKeyframesAtCursor(), "再次粘贴（目标时刻已有帧）");
+        const QList<Keyframe>& keys2 = core.findObject(id)->keyframes;
+        CHECK(keys2.size() == 4 && keys2.at(1) == Keyframe({ 3.0, 10.0, 10.0, 0.0 }),
+              "粘贴 upsert 覆盖目标时刻已有帧");
+
+        // 复制不存在的关键帧 → 剪贴板清空，粘贴返回 false
+        core.copySelectedKeyframes({ { id, 99.0 } });
+        CHECK(!core.keyframeClipboardHasContent() && !core.pasteKeyframesAtCursor(),
+              "复制不存在的帧 → 剪贴板空、粘贴 false");
+
+        // 目标对象已删除：条目跳过，无有效目标返回 false
+        core.copySelectedKeyframes({ { id, 1.0 } });
+        core.selection()->select(id);
+        CHECK(core.deleteSelection(), "关键帧剪贴板：删除对象");
+        CHECK(!core.pasteKeyframesAtCursor(), "目标对象已删除跳过 → 无有效目标返回 false");
+    }
+}
+
+// 阶段5：打帧流程（需求第 20 条，业务层主导，确认回调模拟弹窗决策）
+void testKeyframeWorkflow()
+{
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+    runtime.settings().setKeyframePromptSuppressed(false); // 已知起点：未抑制
+
+    CHECK(core.createObject(ObjectType::Actor, QPointF(100.0, 200.0)), "打帧流程：创建演员");
+    const QString id = QStringLiteral("actor-001");
+    TimelinePlayer* player = core.timelinePlayer();
+    player->seekTo(2.0);
+
+    // 无关键帧 + 未抑制：触发询问；选"否" → 零变更（不产生任何数据修改）
+    bool confirmCalled = false;
+    const FileData beforePrompt = runtime.fileData();
+    CHECK(!core.setTransformsAtCursor({ { id, { 300.0, 400.0, 0.0 } } },
+                                      [&confirmCalled] {
+                                          confirmCalled = true;
+                                          return false;
+                                      }),
+          "打帧流程：选\"否\"返回 false");
+    CHECK(confirmCalled, "打帧流程：无关键帧时触发询问回调");
+    CHECK(runtime.fileData() == beforePrompt, "打帧流程：选\"否\"零变更");
+
+    // 选"是" → 在游标处生成关键帧；静态 transform 不变
+    CHECK(core.setTransformsAtCursor({ { id, { 300.0, 400.0, 45.0 } } },
+                                     [] { return true; }),
+          "打帧流程：选\"是\"打帧");
+    {
+        const ObjectData* object = core.findObject(id);
+        CHECK(object->keyframes.size() == 1
+                  && object->keyframes.first() == Keyframe({ 2.0, 300.0, 400.0, 45.0 }),
+              "打帧流程：关键帧落游标处");
+        CHECK(object->transform == Transform({ 100.0, 200.0, 0.0 }), "打帧不改静态 transform");
+        Transform shown;
+        CHECK(core.displayTransform(id, shown) && shown == Transform({ 300.0, 400.0, 45.0 }),
+              "打帧流程：当前时刻显示值 = 新帧");
+    }
+
+    // T 处已有帧 → 直接更新，不询问
+    confirmCalled = false;
+    CHECK(core.setTransformsAtCursor({ { id, { 350.0, 450.0, 90.0 } } },
+                                     [&confirmCalled] {
+                                         confirmCalled = true;
+                                         return false;
+                                     }),
+          "打帧流程：已有帧直接更新");
+    CHECK(!confirmCalled, "打帧流程：已有帧不询问");
+    CHECK(core.findObject(id)->keyframes.size() == 1
+              && core.findObject(id)->keyframes.first().x == 350.0,
+          "打帧流程：已有帧更新不新增");
+
+    // 其它时刻无帧 → 再次询问
+    player->seekTo(5.0);
+    confirmCalled = false;
+    CHECK(core.setTransformsAtCursor({ { id, { 0.0, 0.0, 0.0 } } },
+                                     [&confirmCalled] {
+                                         confirmCalled = true;
+                                         return true;
+                                     }),
+          "打帧流程：新时刻选\"是\"");
+    CHECK(confirmCalled, "打帧流程：新时刻无帧触发询问");
+    CHECK(core.findObject(id)->keyframes.size() == 2
+              && core.findObject(id)->keyframes.at(1).t == 5.0,
+          "打帧流程：新帧按 t 有序插入");
+
+    // 已抑制 → 直接打帧不询问
+    runtime.settings().setKeyframePromptSuppressed(true);
+    player->seekTo(7.0);
+    confirmCalled = false;
+    CHECK(core.setTransformsAtCursor({ { id, { 1.0, 2.0, 3.0 } } },
+                                     [&confirmCalled] {
+                                         confirmCalled = true;
+                                         return false;
+                                     }),
+          "打帧流程：抑制后直接打帧");
+    CHECK(!confirmCalled, "打帧流程：抑制后不再询问");
+    CHECK(core.findObject(id)->keyframes.size() == 3, "打帧流程：抑制后生成关键帧");
+    runtime.settings().setKeyframePromptSuppressed(false);
+
+    // 值等于当前显示值 → 无变更不提交（零位移拖拽语义）
+    player->seekTo(7.0); // 显示值 = 刚打的帧 (1,2,3)
+    CHECK(!core.setTransformsAtCursor({ { id, { 1.0, 2.0, 3.0 } } }, [] { return true; }),
+          "打帧流程：值同显示值判定无变更");
+    CHECK(core.findObject(id)->keyframes.size() == 3, "无变更不新增帧");
+
+    // 打帧按钮（keyframeSelectionAtCursor）：以当前显示值 upsert，不弹窗
+    core.selection()->select(id);
+    CHECK(core.canKeyframeSelection(), "打帧按钮：单选演员可用");
+    player->seekTo(4.0);
+    Transform shown4;
+    CHECK(core.displayTransform(id, shown4), "打帧按钮：取显示值");
+    CHECK(core.keyframeSelectionAtCursor(), "打帧按钮：以显示值打帧");
+    {
+        const QList<Keyframe>& keys = core.findObject(id)->keyframes;
+        CHECK(keys.size() == 4, "打帧按钮：新增一帧");
+        bool matched = false;
+        for (const Keyframe& key : keys) {
+            if (key.t == 4.0)
+                matched = Transform({ key.x, key.y, key.rotation }) == shown4;
+        }
+        CHECK(matched, "打帧按钮：帧值 = 当前时刻插值显示值");
+    }
+    CHECK(!core.keyframeSelectionAtCursor(), "打帧按钮：重复打同值判定无变更不入栈");
+
+    // 打帧按钮可用性：空选/多选/空对象禁用
+    core.selection()->clear();
+    CHECK(!core.canKeyframeSelection(), "打帧按钮：空选禁用");
+    CHECK(core.createObject(ObjectType::Group, QPointF(0.0, 0.0)), "打帧流程：创建空对象");
+    const QString groupId = runtime.fileData().objects.last().id;
+    CHECK(!core.canKeyframeSelection(), "打帧按钮：单选空对象禁用");
+    core.selection()->setSelection({ id, groupId });
+    CHECK(!core.canKeyframeSelection(), "打帧按钮：多选禁用");
+    // 空对象无关键帧语义：变换入口跳过（批次为空 → false）
+    CHECK(!core.setTransformsAtCursor({ { groupId, { 0.0, 0.0, 0.0 } } }, [] { return true; }),
+          "打帧流程：空对象跳过打帧");
+
+    // 方向键微调走同一流程（含询问回调）
+    core.selection()->select(id);
+    player->seekTo(9.0); // 无帧（末帧 @7）
+    confirmCalled = false;
+    CHECK(core.moveSelectionBy(QPointF(10.0, 0.0),
+                               [&confirmCalled] {
+                                   confirmCalled = true;
+                                   return true;
+                               }),
+          "打帧流程：方向键微调打帧");
+    CHECK(confirmCalled, "打帧流程：方向键微调触发询问");
+    {
+        const QList<Keyframe>& keys = core.findObject(id)->keyframes;
+        // 显示基准 = 末帧 @7 (1,2,3)，+10x → (11,2,3)
+        CHECK(keys.last() == Keyframe({ 9.0, 11.0, 2.0, 3.0 }),
+              "打帧流程：微调以当前显示值为基准");
+    }
+
+    // 粘贴：关键帧位置随副本整体偏移 +20/+20（时刻/朝向不变）
+    core.selection()->select(id);
+    core.copySelection();
+    CHECK(core.pasteClipboard(), "打帧流程：粘贴含关键帧对象");
+    {
+        const ObjectData& pasted = runtime.fileData().objects.last();
+        CHECK(pasted.keyframes.size() == core.findObject(id)->keyframes.size(),
+              "粘贴复制全部关键帧");
+        bool offsetOk = true;
+        const QList<Keyframe>& source = core.findObject(id)->keyframes;
+        for (int i = 0; i < source.size(); ++i) {
+            offsetOk = offsetOk && pasted.keyframes.at(i).t == source.at(i).t
+                && pasted.keyframes.at(i).x == source.at(i).x + 20.0
+                && pasted.keyframes.at(i).y == source.at(i).y + 20.0
+                && pasted.keyframes.at(i).rotation == source.at(i).rotation;
+        }
+        CHECK(offsetOk, "粘贴：关键帧位置随副本偏移 +20/+20");
+    }
+}
+
+// 阶段5 验收硬点（实施计划风险2）：撤销/重做关键帧命令后，游标处插值立即刷新；
+// 播放 tick 驱动游标推进，到末尾自动停止
+void testTimelineUndoRefresh()
+{
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+    runtime.settings().setKeyframePromptSuppressed(true);
+
+    CHECK(core.createObject(ObjectType::Actor, QPointF(10.0, 20.0)), "刷新：创建演员");
+    const QString id = QStringLiteral("actor-001");
+    TimelinePlayer* player = core.timelinePlayer();
+    player->seekTo(5.0);
+    CHECK(core.setTransformsAtCursor({ { id, { 110.0, 120.0, 30.0 } } }, [] { return true; }),
+          "刷新：游标处打帧");
+
+    int timeSignals = 0;
+    QObject::connect(player, &TimelinePlayer::currentTimeChanged, player,
+                     [&timeSignals](double) { ++timeSignals; });
+
+    Transform value;
+    CHECK(core.undo(), "刷新：撤销打帧");
+    CHECK(timeSignals == 1, "刷新：undo 后 player 重算并发 currentTimeChanged");
+    CHECK(core.displayTransform(id, value) && value == Transform({ 10.0, 20.0, 0.0 }),
+          "刷新：撤销后游标处立即回到静态值");
+    CHECK(core.redo(), "刷新：重做打帧");
+    CHECK(timeSignals == 2, "刷新：redo 后 player 重算并发信号");
+    CHECK(core.displayTransform(id, value) && value == Transform({ 110.0, 120.0, 30.0 }),
+          "刷新：重做后游标处立即取插值结果");
+
+    // 撤销"自动延长"后时长回退：游标越界被钳制
+    player->seekTo(50.0);
+    CHECK(core.setTransformsAtCursor({ { id, { 0.0, 0.0, 0.0 } } }, [] { return true; }),
+          "刷新：t=50 打帧");
+    CHECK(runtime.fileData().timeline.duration == 60.0, "刷新：t=50 未超出默认 60s");
+    player->seekTo(60.0);
+    // t=60 处显示值为末帧 @50 (0,0,0)，改 (5,5,5) 属真实变更
+    CHECK(core.setTransformsAtCursor({ { id, { 5.0, 5.0, 5.0 } } }, [] { return true; }),
+          "刷新：t=60 打帧（末后保持基准上的真实变更）");
+    CHECK(runtime.fileData().timeline.duration == 60.0, "刷新：t=60 不延长时长");
+    // 拖到 70s 延长时长
+    CHECK(core.moveKeyframe(id, 60.0, 70.0), "刷新：关键帧拖到 70s");
+    CHECK(runtime.fileData().timeline.duration == 70.0, "刷新：时长自动延长到 70s");
+    player->seekTo(70.0);
+    CHECK(core.undo(), "刷新：撤销改时刻（时长应一并还原）");
+    CHECK(runtime.fileData().timeline.duration == 60.0, "刷新：撤销后时长还原 60s");
+    CHECK(player->currentTime() == 60.0, "刷新：时长回退后游标钳制到 60s");
+
+    // 播放 tick：时长调短到 0.2s，播放后自动停在末帧（真实事件循环驱动）
+    FileData shortData = runtime.fileData();
+    shortData.timeline.duration = 0.2;
+    runtime.commitFileData(shortData);
+    player->seekTo(0.0);
+    player->play();
+    CHECK(player->isPlaying(), "播放：开始播放");
+    QEventLoop loop;
+    QTimer::singleShot(500, &loop, &QEventLoop::quit);
+    loop.exec();
+    CHECK(!player->isPlaying(), "播放：到末尾自动停止");
+    CHECK(qAbs(player->currentTime() - 0.2) < 1e-9, "播放：游标停在末帧");
+    // 末尾再播放：从头开始
+    player->play();
+    CHECK(player->isPlaying() && player->currentTime() < 0.2, "播放：末尾再播放从头开始");
+    player->pause();
+}
+
+void testRoundTrip(QTemporaryDir& dir)
+{
+    const FileData original = makeSampleData();
+    const QString path = dir.filePath(QStringLiteral("roundtrip.json"));
+
+    const SaveResult saveResult = JsonStore::save(path, original);
+    CHECK(saveResult.ok, "保存示例存档：" + saveResult.message);
+
+    const LoadResult loadResult = JsonStore::load(path);
+    CHECK(loadResult.ok(), "读回示例存档：" + loadResult.message);
+    if (!loadResult.ok())
+        return;
+
+    const FileData& loaded = loadResult.data;
+    CHECK(loaded.version == kFileDataVersion, "version 字段一致");
+    CHECK(loaded.stage == original.stage, "StageData 逐字段一致");
+    CHECK(loaded.objects.size() == 2, "对象数量一致（演员+屏风）");
+    CHECK(loaded.objects == original.objects, "ObjectData（含关键帧、屏风 size）逐字段一致");
+    CHECK(loaded.timeline == original.timeline, "TimelineData（含场次标签）逐字段一致");
+    CHECK(loaded == original, "FileData 整体一致");
+}
+
+void testCorruptedFile(QTemporaryDir& dir)
+{
+    const QString path = dir.filePath(QStringLiteral("corrupted.json"));
+    CHECK(writeTextFile(path, "{ this is not valid json !!!"), "写入损坏测试文件");
+
+    const LoadResult result = JsonStore::load(path);
+    CHECK(!result.ok() && result.error == LoadError::Parse,
+          "损坏 JSON 返回 LoadError::Parse 而非崩溃（message：" + result.message + "）");
+
+    // 根节点不是对象
+    const QString arrayPath = dir.filePath(QStringLiteral("array.json"));
+    writeTextFile(arrayPath, "[1, 2, 3]");
+    const LoadResult arrayResult = JsonStore::load(arrayPath);
+    CHECK(!arrayResult.ok() && arrayResult.error == LoadError::Parse, "根节点为数组返回 LoadError::Parse");
+}
+
+void testVersionMismatch(QTemporaryDir& dir)
+{
+    QJsonObject root = JsonStore::toJson(FileData::createDefault());
+
+    root[QStringLiteral("version")] = 2;
+    const QString futurePath = dir.filePath(QStringLiteral("v2.json"));
+    writeTextFile(futurePath, QJsonDocument(root).toJson());
+    const LoadResult futureResult = JsonStore::load(futurePath);
+    CHECK(!futureResult.ok() && futureResult.error == LoadError::UnsupportedVersion,
+          "version=2 返回 LoadError::UnsupportedVersion");
+
+    root.remove(QStringLiteral("version"));
+    const QString missingPath = dir.filePath(QStringLiteral("noversion.json"));
+    writeTextFile(missingPath, QJsonDocument(root).toJson());
+    const LoadResult missingResult = JsonStore::load(missingPath);
+    CHECK(!missingResult.ok() && missingResult.error == LoadError::UnsupportedVersion,
+          "version 缺失返回 LoadError::UnsupportedVersion");
+}
+
+void testMissingFile(QTemporaryDir& dir)
+{
+    const LoadResult result = JsonStore::load(dir.filePath(QStringLiteral("does-not-exist.json")));
+    CHECK(!result.ok() && result.error == LoadError::Io, "文件不存在返回 LoadError::Io");
+}
+
+void testInvalidStructure(QTemporaryDir& dir)
+{
+    QJsonObject root = JsonStore::toJson(FileData::createDefault());
+    root.remove(QStringLiteral("stage"));
+    const QString path = dir.filePath(QStringLiteral("nostage.json"));
+    writeTextFile(path, QJsonDocument(root).toJson());
+
+    const LoadResult result = JsonStore::load(path);
+    CHECK(!result.ok() && result.error == LoadError::InvalidData,
+          "缺少 stage 节点返回 LoadError::InvalidData（message：" + result.message + "）");
+}
+
+void testSettingsPersistence(QCoreApplication& app)
+{
+    // 从已知状态开始
+    {
+        QSettings settings;
+        settings.clear();
+    }
+
+    // 默认值
+    {
+        AppSettings settings;
+        CHECK(settings.gridSnapEnabled() == AppSettings::defaultGridSnapEnabled,
+              "网格吸附默认取独立常量（开）");
+        CHECK(settings.gridVisible() == AppSettings::defaultGridVisible,
+              "网格可见性默认取独立常量（开）");
+        CHECK(settings.keyframePromptSuppressed() == AppSettings::defaultKeyframePromptSuppressed,
+              "“打帧提示不再提示”默认取独立常量（关）");
+        CHECK(settings.stageColor() == AppSettings::defaultStageColor(),
+              "舞台颜色默认取独立常量（比网格深、比背景浅）");
+        CHECK(settings.gridSizeCm() == AppSettings::defaultGridSizeCm,
+              "网格间距默认取独立常量（100cm）");
+        CHECK(settings.snapRangeCm() == AppSettings::defaultSnapRangeCm,
+              "网格吸附距离默认取独立常量（20cm）");
+
+        // 非正值防御性拒绝（网格间距参与取模运算，除零保护）
+        settings.setGridSizeCm(0.0);
+        settings.setSnapRangeCm(-3.0);
+        CHECK(settings.gridSizeCm() == AppSettings::defaultGridSizeCm
+                  && settings.snapRangeCm() == AppSettings::defaultSnapRangeCm,
+              "网格间距/吸附距离：非正值写入被防御性拒绝");
+    }
+
+    // 写入哨兵值
+    {
+        AppSettings settings;
+        settings.setGridSnapEnabled(false);
+        settings.setGridVisible(false);
+        settings.setKeyframePromptSuppressed(true);
+        settings.setWindowGeometry(QByteArray("selftest-geometry-7f3a"));
+        settings.setWindowState(QByteArray("selftest-state-9b2c"));
+        settings.setStageColor(QColor(QStringLiteral("#123456")));
+        settings.setGridSizeCm(55.5);
+        settings.setSnapRangeCm(12.5);
+    }
+
+    // 同进程新实例读回
+    {
+        AppSettings settings;
+        CHECK(!settings.gridSnapEnabled(), "同进程重建实例读回 gridSnapEnabled=false");
+        CHECK(!settings.gridVisible(), "同进程重建实例读回 gridVisible=false");
+        CHECK(settings.keyframePromptSuppressed(), "同进程重建实例读回 keyframePromptSuppressed=true");
+        CHECK(settings.windowGeometry() == QByteArray("selftest-geometry-7f3a"), "同进程重建实例读回 windowGeometry");
+        CHECK(settings.stageColor() == QColor(QStringLiteral("#123456")), "同进程重建实例读回 stageColor");
+        CHECK(settings.gridSizeCm() == 55.5, "同进程重建实例读回 gridSizeCm");
+        CHECK(settings.snapRangeCm() == 12.5, "同进程重建实例读回 snapRangeCm");
+    }
+
+    // 跨进程读回：子进程以 --verify-settings 模式启动自身
+    QProcess child;
+    child.start(app.applicationFilePath(), { QStringLiteral("--verify-settings") });
+    const bool finished = child.waitForFinished(30000);
+    CHECK(finished && child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0,
+          "QSettings 跨进程持久化（子进程读回哨兵值）");
+
+    // 清理，不留下测试设置
+    {
+        QSettings settings;
+        settings.clear();
+    }
+}
+
+void testRuntimeData(QTemporaryDir& dir)
+{
+    RuntimeData runtime;
+    CHECK(runtime.fileData() == FileData::createDefault(),
+          "RuntimeData 初始为新建默认值（1200x800 / offset 0 / 60s / 空列表）");
+    CHECK(runtime.currentFilePath().isEmpty(), "RuntimeData 初始无文件路径");
+
+    int emissions = 0;
+    QObject::connect(&runtime, &RuntimeData::fileDataChanged, &runtime, [&emissions] { ++emissions; });
+
+    const FileData sample = makeSampleData();
+    const QString path = dir.filePath(QStringLiteral("runtime.json"));
+    const SaveResult saveResult = JsonStore::save(path, sample);
+    CHECK(saveResult.ok, "RuntimeData 测试准备：写入示例存档");
+
+    const LoadResult openResult = runtime.openFile(path);
+    CHECK(openResult.ok() && runtime.fileData() == sample && runtime.currentFilePath() == path,
+          "RuntimeData::openFile 成功并替换只读数据");
+    CHECK(emissions == 1, "openFile 发出一次 fileDataChanged");
+
+    const QString missingPath = dir.filePath(QStringLiteral("runtime-missing.json"));
+    const LoadResult failedOpen = runtime.openFile(missingPath);
+    CHECK(!failedOpen.ok() && failedOpen.error == LoadError::Io && runtime.fileData() == sample,
+          "openFile 失败时保留原数据");
+    CHECK(emissions == 1, "openFile 失败不发信号");
+
+    const QString saveAsPath = dir.filePath(QStringLiteral("runtime-saveas.json"));
+    const SaveResult saveAsResult = runtime.saveFile(saveAsPath, sample);
+    CHECK(saveAsResult.ok && runtime.currentFilePath() == saveAsPath,
+          "RuntimeData::saveFile（业务层显式触发）成功并更新路径");
+    CHECK(emissions == 2, "saveFile 成功发出 fileDataChanged");
+
+    runtime.newFile();
+    CHECK(runtime.fileData() == FileData::createDefault() && runtime.currentFilePath().isEmpty(),
+          "RuntimeData::newFile 重置为默认值");
+    CHECK(emissions == 3, "newFile 发出 fileDataChanged");
+}
+
+// 阶段6：dirty 跟踪——快照内容比较（撤销回已存内容 = 干净），
+// dirtyChanged 只在状态翻转时发；newFile/openFile/saveFile 成功后干净
+void testDirtyTracking(QTemporaryDir& dir)
+{
+    RuntimeData runtime;
+    CHECK(!runtime.isDirty(), "dirty：初始（新建默认）不脏");
+
+    int dirtySignals = 0;
+    QObject::connect(&runtime, &RuntimeData::dirtyChanged, &runtime,
+                     [&dirtySignals] { ++dirtySignals; });
+
+    const FileData sample = makeSampleData();
+    runtime.commitFileData(sample);
+    CHECK(runtime.isDirty(), "dirty：commit 后变脏");
+    CHECK(dirtySignals == 1, "dirty：翻转时发一次 dirtyChanged");
+
+    FileData touched = sample;
+    touched.timeline.duration = 120.0;
+    runtime.commitFileData(touched);
+    CHECK(runtime.isDirty() && dirtySignals == 1, "dirty：持续脏不重复发信号");
+
+    const QString path = dir.filePath(QStringLiteral("dirty.json"));
+    CHECK(runtime.saveFile(path, runtime.fileData()).ok, "dirty：saveFile 成功");
+    CHECK(!runtime.isDirty() && dirtySignals == 2, "dirty：保存后干净并发信号");
+
+    runtime.commitFileData(sample); // sample ≠ 已存快照（touched）→ 脏
+    CHECK(runtime.isDirty() && dirtySignals == 3, "dirty：保存后再编辑变脏");
+
+    runtime.commitFileData(touched); // 内容回到已存快照（模拟撤销回保存点）
+    CHECK(!runtime.isDirty() && dirtySignals == 4,
+          "dirty：内容回到已存快照即干净（撤销跨保存点按内容比较）");
+
+    runtime.commitFileData(sample); // 再脏（信号 5）
+    const LoadResult openResult = runtime.openFile(path); // 快照为 touched
+    CHECK(openResult.ok() && !runtime.isDirty() && dirtySignals == 6,
+          "dirty：openFile 成功后干净");
+
+    runtime.commitFileData(sample); // 再脏（信号 7）
+    runtime.newFile();
+    CHECK(!runtime.isDirty() && dirtySignals == 8, "dirty：newFile 后干净");
+
+    // openFile 失败不影响 dirty 状态
+    runtime.commitFileData(sample); // 脏（信号 9）
+    const LoadResult failed =
+        runtime.openFile(dir.filePath(QStringLiteral("dirty-missing.json")));
+    CHECK(!failed.ok() && runtime.isDirty() && dirtySignals == 9,
+          "dirty：openFile 失败保持脏状态且不发信号");
+}
+
+// 阶段7：EditorCore::setStage 直改直提交语义——合法修改生效（commitFileData
+// 提交回数据层）、宽/深 ≤ 0 拒绝、无变更不提交、不产生撤销条目、undo 不影响
+// 舞台值（SetStageCommand 已随阶段7 移除，舞台不入撤销栈）
+void testStageSettings()
+{
+    const FileData original = makeSampleData(); // stage {1500, 900, 50}
+
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+    runtime.commitFileData(original);
+    const StageData current = runtime.fileData().stage;
+
+    int emissions = 0;
+    QObject::connect(&runtime, &RuntimeData::fileDataChanged, &runtime,
+                     [&emissions] { ++emissions; });
+
+    // 无变更不提交
+    CHECK(!core.setStage(current), "setStage 无变更不提交（返回 false）");
+    CHECK(emissions == 0 && !core.canUndo(),
+          "setStage 无变更：不发 fileDataChanged、不动撤销栈");
+
+    // 非法尺寸拒绝
+    CHECK(!core.setStage(StageData { 0.0, 800.0, 0.0 }), "setStage 拒绝宽 ≤ 0");
+    CHECK(!core.setStage(StageData { 1200.0, -5.0, 0.0 }), "setStage 拒绝深 ≤ 0");
+    CHECK(runtime.fileData().stage == current && emissions == 0 && !core.canUndo(),
+          "setStage 非法尺寸：不改数据、不发信号、不动撤销栈");
+
+    // 合法修改生效：直改直提交，不入撤销栈
+    CHECK(core.setStage(StageData { 2400.0, 1800.0, -250.0 }), "setStage 合法修改生效");
+    CHECK(runtime.fileData().stage == StageData({ 2400.0, 1800.0, -250.0 }),
+          "setStage 提交回数据层");
+    CHECK(emissions == 1, "setStage 发出一次 fileDataChanged");
+    CHECK(!core.canUndo(), "setStage 不产生撤销条目（canUndo 不变）");
+
+    // centerOffset 任意 double（负值合法）
+    CHECK(core.setStage(StageData { 2400.0, 1800.0, -999.5 }), "setStage：centerOffset 负值合法");
+    CHECK(!core.canUndo(), "setStage 再次直改仍无撤销条目");
+
+    // undo 不影响舞台值：对象命令入栈 → 改舞台 → undo 只撤对象
+    CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "setStage 测试：创建演员入撤销栈");
+    CHECK(core.canUndo(), "setStage 测试：对象命令可撤销");
+    CHECK(core.setStage(StageData { 3000.0, 2000.0, 10.0 }), "setStage 测试：入栈后再改舞台");
+    CHECK(core.undo(), "setStage 测试：undo 撤掉对象命令");
+    CHECK(runtime.fileData().objects.size() == original.objects.size(),
+          "setStage 测试：undo 移除新建对象（回到 original 的 2 个对象）");
+    CHECK(runtime.fileData().stage == StageData({ 3000.0, 2000.0, 10.0 }),
+          "setStage 测试：undo 不影响舞台值");
+    CHECK(!core.canUndo(), "setStage 测试：撤销后栈空（无舞台条目残留）");
+}
+
+// 阶段8：AppSettings 最近使用列表（MRU）语义 + RuntimeData 记录时机。
+// MRU 哨兵在用例开头/结尾清理，避免残留影响下次运行
+void testRecentFiles(QTemporaryDir& dir)
+{
+    // 从已知状态开始：清空（QSettings 跨运行持久化）
+    {
+        AppSettings settings;
+        const QStringList existing = settings.recentFiles();
+        for (const QString& path : existing)
+            settings.removeRecentFile(path);
+        CHECK(settings.recentFiles().isEmpty(), "MRU：用例前清空最近列表");
+    }
+
+    // ---- 追加 / 置顶（新→旧） ----
+    AppSettings settings;
+    settings.addRecentFile(QStringLiteral("C:/Projects/alpha.json"));
+    settings.addRecentFile(QStringLiteral("D:/Work/beta.json"));
+    CHECK(settings.recentFiles()
+              == QStringList({ QStringLiteral("D:/Work/beta.json"),
+                               QStringLiteral("C:/Projects/alpha.json") }),
+          "MRU：追加后新条目置顶（新→旧）");
+
+    // ---- 去重置顶：Windows 路径大小写不敏感比较 ----
+    settings.addRecentFile(QStringLiteral("c:/projects/ALPHA.json"));
+    CHECK(settings.recentFiles().size() == 2
+              && settings.recentFiles().first() == QStringLiteral("c:/projects/ALPHA.json"),
+          "MRU：大小写不敏感去重后置顶（保留本次写入的写法）");
+    // 分隔符差异视为同一路径
+    settings.addRecentFile(QStringLiteral("D:\\Work\\beta.json"));
+    CHECK(settings.recentFiles().size() == 2
+              && settings.recentFiles().first() == QStringLiteral("D:\\Work\\beta.json"),
+          "MRU：反斜杠分隔符去重后置顶");
+
+    // ---- 超 10 条截断：丢弃最旧 ----
+    for (int i = 0; i < 12; ++i)
+        settings.addRecentFile(QStringLiteral("E:/mru-%1.json").arg(i));
+    CHECK(settings.recentFiles().size() == AppSettings::kMaxRecentFiles,
+          "MRU：上限 10 条截断");
+    CHECK(settings.recentFiles().first() == QStringLiteral("E:/mru-11.json")
+              && settings.recentFiles().last() == QStringLiteral("E:/mru-2.json"),
+          "MRU：截断丢弃最旧条目");
+
+    // ---- removeRecentFile：按同一大小写不敏感比较 ----
+    settings.removeRecentFile(QStringLiteral("e:/MRU-11.JSON"));
+    CHECK(settings.recentFiles().size() == 9
+              && !settings.recentFiles().contains(QStringLiteral("E:/mru-11.json")),
+          "MRU：removeRecentFile 按同一比较移除");
+
+    // ---- 跨实例读回（同进程新实例 = QSettings 持久化） ----
+    {
+        AppSettings fresh;
+        CHECK(fresh.recentFiles() == settings.recentFiles(), "MRU：跨实例读回一致");
+    }
+
+    // ---- RuntimeData 记录时机：openFile/saveFile 成功入 MRU，失败不入 ----
+    {
+        RuntimeData runtime;
+        const QString openPath = dir.filePath(QStringLiteral("mru-open.json"));
+        CHECK(JsonStore::save(openPath, makeSampleData()).ok, "MRU：测试准备写入存档");
+        CHECK(runtime.openFile(openPath).ok(), "MRU：openFile 成功");
+        CHECK(!runtime.settings().recentFiles().isEmpty()
+                  && runtime.settings().recentFiles().first() == openPath,
+              "MRU：openFile 成功入列表（置顶）");
+
+        const QString savePath = dir.filePath(QStringLiteral("mru-saveas.json"));
+        CHECK(runtime.saveFile(savePath, runtime.fileData()).ok, "MRU：saveFile 成功");
+        CHECK(runtime.settings().recentFiles().first() == savePath,
+              "MRU：saveFile 成功入列表（另存为路径置顶）");
+
+        const QStringList before = runtime.settings().recentFiles();
+        const QString missingPath = dir.filePath(QStringLiteral("mru-missing.json"));
+        CHECK(!runtime.openFile(missingPath).ok(), "MRU：openFile 失败");
+        CHECK(runtime.settings().recentFiles() == before
+                  && !runtime.settings().recentFiles().contains(missingPath),
+              "MRU：openFile 失败不入列表");
+    }
+
+    // 用例结尾清理 MRU 哨兵
+    {
+        AppSettings cleanup;
+        const QStringList existing = cleanup.recentFiles();
+        for (const QString& path : existing)
+            cleanup.removeRecentFile(path);
+        CHECK(cleanup.recentFiles().isEmpty(), "MRU：用例结尾清理哨兵");
+    }
+}
+
+
+// 子进程模式：读回哨兵值校验 QSettings 持久化
+int verifySettings()
+{
+    AppSettings settings;
+    const bool ok = !settings.gridSnapEnabled()
+        && !settings.gridVisible()
+        && settings.keyframePromptSuppressed()
+        && settings.windowGeometry() == QByteArray("selftest-geometry-7f3a")
+        && settings.windowState() == QByteArray("selftest-state-9b2c")
+        && settings.stageColor() == QColor(QStringLiteral("#123456"))
+        && settings.gridSizeCm() == 55.5
+        && settings.snapRangeCm() == 12.5;
+    out() << (ok ? "[PASS] 子进程读回设置哨兵值" : "[FAIL] 子进程读回设置哨兵值") << Qt::endl;
+    return ok ? 0 : 1;
+}
+
+} // namespace
+
+int main(int argc, char* argv[])
+{
+    QCoreApplication app(argc, argv);
+    QCoreApplication::setOrganizationName(QLatin1String(kTestOrgName));
+    QCoreApplication::setApplicationName(QLatin1String(kTestAppName));
+
+    if (app.arguments().contains(QStringLiteral("--verify-settings")))
+        return verifySettings();
+
+    testTypeMapping();
+    testAngleConversion();
+    testRotationFromVector();
+    testCommandRoundTrip();
+    testReparentCommand();
+    testCascadeRemove();
+    testEditorCore();
+    testEditorCoreGroupReparent();
+    testInterpolation();
+    testKeyframeCommands();
+    testTimelineElementEditing();
+    testKeyframeWorkflow();
+    testTimelineUndoRefresh();
+
+    QTemporaryDir dir;
+    if (!dir.isValid()) {
+        out() << "[FAIL] 无法创建临时目录" << Qt::endl;
+        return 1;
+    }
+
+    testRoundTrip(dir);
+    testParentGroupJson(dir);
+    testCorruptedFile(dir);
+    testVersionMismatch(dir);
+    testMissingFile(dir);
+    testInvalidStructure(dir);
+    testSettingsPersistence(app);
+    testRuntimeData(dir);
+    testDirtyTracking(dir);
+    testStageSettings();
+    testUndoStack(dir);
+    testUndoRedoSequence();
+    testRecentFiles(dir);
+
+    out() << Qt::endl;
+    if (g_failures == 0) {
+        out() << "全部用例通过" << Qt::endl;
+        return 0;
+    }
+    out() << g_failures << " 个用例失败" << Qt::endl;
+    return 1;
+}
