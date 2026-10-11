@@ -24,9 +24,11 @@ int main(int argc, char* argv[])
     }
 
     MainWindow window;
-    window.resize(1440, 900);
 
     if (!screenshotPath.isEmpty()) {
+        // 截图自测固定 1440×900：真实设置区可能存有用户布局，构造内 restore 已改过
+        // 尺寸，截图模式必须在打开存档前重钉尺寸，保证与既有验收图可比
+        window.resize(1440, 900);
         window.openFromPath(QCoreApplication::applicationDirPath()
                             + QStringLiteral("/stage-demo.json"));
         window.show();

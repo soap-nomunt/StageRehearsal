@@ -39,6 +39,9 @@
 // 阶段8 启动适配：MainWindow 构造不再自动加载任何文件（构造即默认空舞台），
 // 依赖示例存档的段落（main 初始/w2/w6）构造后显式 openFromPath 再继续断言。
 // QFileDialog 原生对话框 offscreen 不可驱动——文件对话框与重名覆盖确认列手测。
+// 阶段9 追加：窗口布局持久化（窗口1 改尺寸+浮动 Dock 关闭 → 窗口2 恢复一致；
+// 首次运行默认 1440×900 三栏；用例前后清空布局键沿用哨兵模式）、
+// 倍速下拉框"倍速"标注（speedLabel）与 ToolTip。
 //
 // 运行（Git Bash，项目根目录）：
 //   QT_QPA_PLATFORM=offscreen ./build/Debug/InteractionSelfTest.exe
@@ -1737,6 +1740,79 @@ int main(int argc, char* argv[])
         for (const QString& p : settings.recentFiles())
             settings.removeRecentFile(p);
         CHECK(settings.recentFiles().isEmpty(), "阶段8：用例结尾清理 MRU 哨兵");
+    }
+
+    // ==================== 阶段9：窗口布局持久化 + 倍速标注 ====================
+    // ---- 倍速下拉框标注：speedLabel 文本"倍速"，speedCombo ToolTip"播放速度" ----
+    {
+        auto* speedLabel9 = window.findChild<QLabel*>(QStringLiteral("speedLabel"));
+        CHECK(speedLabel9 && speedLabel9->text() == QStringLiteral("倍速"),
+              "阶段9：倍速下拉框标注（speedLabel 文本“倍速”）");
+        CHECK(speedCombo->toolTip() == QStringLiteral("播放速度"),
+              "阶段9：倍速下拉框 ToolTip“播放速度”");
+    }
+
+    // ---- 窗口布局持久化：窗口1 改尺寸+浮动 Dock 关闭 → 窗口2 恢复一致 ----
+    // 布局键清理由 AppSettings 置空完成（空 = 首次运行语义），沿用 MRU 哨兵模式；
+    // 用例前必须清空：上文 closeEvent 用例（w3/w5）已顺带写入布局键
+    {
+        AppSettings settings9;
+        settings9.setWindowGeometry(QByteArray());
+        settings9.setWindowState(QByteArray());
+        CHECK(settings9.windowGeometry().isEmpty() && settings9.windowState().isEmpty(),
+              "阶段9：用例前清空布局设置键");
+
+        // 首次运行（键为空）：默认布局不回归（1440×900，左 Hierarchy / 右 Inspector / 底时间轴）
+        {
+            MainWindow w9;
+            auto* hierarchyDock9 = w9.findChild<QDockWidget*>(QStringLiteral("hierarchyDock"));
+            auto* inspectorDock9 = w9.findChild<QDockWidget*>(QStringLiteral("inspectorDock"));
+            auto* timelineDock9 = w9.findChild<QDockWidget*>(QStringLiteral("timelineDock"));
+            CHECK(w9.size() == QSize(1440, 900), "阶段9：首次运行默认 1440×900");
+            CHECK(hierarchyDock9 && inspectorDock9 && timelineDock9
+                      && w9.dockWidgetArea(hierarchyDock9) == Qt::LeftDockWidgetArea
+                      && w9.dockWidgetArea(inspectorDock9) == Qt::RightDockWidgetArea
+                      && w9.dockWidgetArea(timelineDock9) == Qt::BottomDockWidgetArea
+                      && !hierarchyDock9->isFloating() && !inspectorDock9->isFloating()
+                      && !timelineDock9->isFloating(),
+                  "阶段9：首次运行默认三栏布局（左/右/底，均非浮动）");
+        }
+
+        // 窗口1：调整尺寸 + 浮动一个 Dock → close() 保存布局
+        // （offscreen 屏幕 800×800，restoreGeometry 会把恢复尺寸钳进可用区，故取 700×500）
+        const QSize customSize9(700, 500);
+        QSize savedSize9;
+        {
+            MainWindow w9a;
+            w9a.resize(customSize9);
+            w9a.show();
+            QTest::qWaitForWindowExposed(&w9a);
+            w9a.findChild<QDockWidget*>(QStringLiteral("inspectorDock"))->setFloating(true);
+            CHECK(w9a.size() == customSize9, "阶段9：窗口1 尺寸调整生效");
+            savedSize9 = w9a.size();
+            w9a.close(); // 不脏：无弹窗直关，closeEvent 落盘布局
+            CHECK(!w9a.isVisible(), "阶段9：窗口1 关闭");
+        }
+        CHECK(!settings9.windowGeometry().isEmpty() && !settings9.windowState().isEmpty(),
+              "阶段9：关闭后布局键已写入");
+
+        // 窗口2：几何与 Dock 布局恢复一致
+        {
+            MainWindow w9b;
+            w9b.show();
+            QTest::qWaitForWindowExposed(&w9b);
+            CHECK(w9b.size() == savedSize9, "阶段9：窗口2 几何恢复一致");
+            auto* inspectorDock9b =
+                w9b.findChild<QDockWidget*>(QStringLiteral("inspectorDock"));
+            CHECK(inspectorDock9b && inspectorDock9b->isFloating(),
+                  "阶段9：窗口2 Dock 浮动状态恢复一致");
+        }
+
+        // 用例结尾清理布局设置键（哨兵模式），避免残留影响下次运行
+        settings9.setWindowGeometry(QByteArray());
+        settings9.setWindowState(QByteArray());
+        CHECK(settings9.windowGeometry().isEmpty() && settings9.windowState().isEmpty(),
+              "阶段9：用例结尾清理布局设置键");
     }
 
     out() << Qt::endl;

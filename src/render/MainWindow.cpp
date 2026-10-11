@@ -8,6 +8,7 @@
 #include "TimelineWidget.h"
 #include "business/EditorCore.h"
 #include "business/SelectionModel.h"
+#include "data/AppSettings.h"
 #include "data/RuntimeData.h"
 
 #include <QAction>
@@ -54,6 +55,16 @@ MainWindow::MainWindow(QWidget* parent)
     // 启动时的存档选择由 main.cpp 的启动页决定（截图自测模式直开示例存档）
     updateWindowTitle();
     m_view->resetView();
+
+    // 窗口布局持久化（阶段9）：先给首次运行默认尺寸；有存档则恢复
+    // （空 = 首次运行，保持默认；restore 失败静默退回默认，不弹错误）。
+    // 接线点必须在末尾：restoreState 依赖 setupDockPanels 已建好带 objectName 的 Dock
+    resize(1440, 900);
+    AppSettings settings;
+    if (!settings.windowGeometry().isEmpty())
+        restoreGeometry(settings.windowGeometry());
+    if (!settings.windowState().isEmpty())
+        restoreState(settings.windowState());
 }
 
 void MainWindow::dumpScreenshotForSelfTest(const QString& path)
@@ -157,10 +168,15 @@ bool MainWindow::saveWithDialog()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    if (maybeCloseOrContinue())
+    if (maybeCloseOrContinue()) {
+        // 确认关闭才持久化布局（阶段9）；QSettings 写失败静默跳过，不影响关闭
+        AppSettings settings;
+        settings.setWindowGeometry(saveGeometry());
+        settings.setWindowState(saveState());
         event->accept();
-    else
+    } else {
         event->ignore();
+    }
 }
 
 void MainWindow::updateWindowTitle()

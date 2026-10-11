@@ -56,7 +56,7 @@ public:
     QByteArray windowState() const;
     void setWindowState(const QByteArray& state);
 
-    QColor stageColor() const;                        // 舞台颜色（默认白色），画布底色固定深灰
+    QColor stageColor() const;                        // 舞台颜色（默认 #a0a0a0 浅灰），画布底色固定深灰
     void setStageColor(const QColor& color);
 
     // ---- 最近使用列表（阶段8，启动页唯一入口） ----

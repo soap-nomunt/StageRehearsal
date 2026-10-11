@@ -952,6 +952,7 @@ TimelineWidget::TimelineWidget(EditorCore* editorCore, QWidget* parent)
                                QPair<QString, double>(QStringLiteral("4×"), 4.0) })
         m_speedCombo->addItem(entry.first, entry.second);
     m_speedCombo->setCurrentIndex(2); // 1×
+    m_speedCombo->setToolTip(QStringLiteral("播放速度"));
     m_timeReadout = new QLabel(this);
     m_timeReadout->setObjectName(QStringLiteral("timeReadout"));
     m_addLabelButton = new QPushButton(QStringLiteral("＋标签"), this);
@@ -959,6 +960,9 @@ TimelineWidget::TimelineWidget(EditorCore* editorCore, QWidget* parent)
     m_addLabelButton->setToolTip(QStringLiteral("在当前时刻添加场次标签（纯视觉标记）"));
     toolbar->addWidget(m_keyframeButton);
     toolbar->addWidget(m_playButton);
+    auto* speedLabel = new QLabel(QStringLiteral("倍速"), this);
+    speedLabel->setObjectName(QStringLiteral("speedLabel"));
+    toolbar->addWidget(speedLabel);
     toolbar->addWidget(m_speedCombo);
     toolbar->addWidget(m_timeReadout);
     toolbar->addStretch();
