@@ -3,6 +3,9 @@
 build*/
 out/
 
+# 分发打包产物（含 exe 和依赖 DLL，体积大，不上传）
+dist/
+
 # CMake 生成物（防止在源码目录内直接 configure 时混入）
 CMakeCache.txt
 CMakeFiles/
