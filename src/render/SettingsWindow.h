@@ -21,13 +21,20 @@
 // 主视口/Hierarchy/Inspector/时间轴中的可操作对象，舞台只能在本窗口调整，不在
 // 其列）；舞台颜色/网格吸附/显示网格/打帧询问是软件自身设置（AppSettings，
 // QSettings 持久化），不进文件、不弄脏 dirty、不入撤销栈。
+// 阶段10：舞台分类页顶部新增"舞台与准备区"方块编辑器（PrepAreaCanvas，
+// Windows 显示设置式布置图）——准备区布局是文件数据（FileData.prepAreas），
+// 经 EditorCore add/remove/setPrepAreas 直改直提交、不入撤销栈（同 setStage
+// 先例）；选中联动：选中舞台 → 舞台属性行可用（准备区行禁用），选中准备区 →
+// 准备区宽高行可用（舞台属性行禁用）。
 
 #include <QColor>
 #include <QDialog>
 #include <QList>
+#include <QRectF>
 #include <QString>
 
 class EditorCore;
+class PrepAreaCanvas;
 class RuntimeData;
 class QCheckBox;
 class QDoubleSpinBox;
@@ -76,6 +83,12 @@ private:
     void applySearchFilter();   // 搜索过滤 / 清空恢复
     void updateColorSwatch();   // 色块按钮底色与色值文本随当前设置刷新
 
+    // ---- 舞台与准备区方块编辑器（阶段10）----
+    QRectF stageRect() const;   // 由当前 StageData 推导的舞台矩形（喂画布用）
+    void feedPrepCanvas();      // fileDataChanged / 颜色改动后回喂画布内容
+    void updatePrepRowStates(); // 选中方块联动：舞台属性行 ⇄ 准备区宽高行启用态与回显
+    void commitPrepSpins();     // 准备区宽高 editingFinished：组装列表走 setPrepAreas
+
     RuntimeData* m_runtimeData = nullptr; // 不拥有
     EditorCore* m_editorCore = nullptr;   // 不拥有
 
@@ -90,6 +103,9 @@ private:
     QDoubleSpinBox* m_depthSpin = nullptr;  // stageDepthSpin
     QDoubleSpinBox* m_offsetSpin = nullptr; // stageOffsetSpin
     QPushButton* m_colorButton = nullptr;   // stageColorButton
+    PrepAreaCanvas* m_prepCanvas = nullptr;     // prepAreaCanvas（阶段10 方块编辑器）
+    QDoubleSpinBox* m_prepWidthSpin = nullptr;  // prepWidthSpin
+    QDoubleSpinBox* m_prepHeightSpin = nullptr; // prepHeightSpin
     QCheckBox* m_gridVisibleCheck = nullptr;    // gridVisibleCheck
     QCheckBox* m_gridSnapCheck = nullptr;       // gridSnapCheck
     QCheckBox* m_keyframePromptCheck = nullptr; // keyframePromptCheck

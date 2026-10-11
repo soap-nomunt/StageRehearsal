@@ -122,6 +122,16 @@ public:
     // commitFileData 提交，dirty 跟踪与 fileDataChanged 刷新路径与命令提交一致。
     bool setStage(const StageData& stage);
 
+    // ---- 台下准备区（阶段10，与 setStage 同例：直改直提交、不入撤销栈） ----
+    // 只能在设置窗口的舞台页方块编辑器中调整。校验：id/name 全局唯一非空、宽高 > 0；
+    // 无变更不提交（返回 false）。
+    bool setPrepAreas(const QList<PrepAreaData>& prepAreas);
+    // 新建准备区：自动唯一 id（prep-NNN 递增查空）与唯一名（"准备区N" 按现存最大
+    // N+1），默认 400×300，中心落在 (x, y)；内部走 setPrepAreas，返回新 id（失败空串）
+    QString addPrepArea(double x, double y);
+    bool removePrepArea(const QString& id);
+    const PrepAreaData* findPrepArea(const QString& id) const;
+
 signals:
     void clipboardChanged();
     void undoStackChanged(); // 入栈/撤销/重做/清空后发出，供菜单可用性刷新

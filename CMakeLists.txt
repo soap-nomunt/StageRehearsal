@@ -57,6 +57,8 @@ qt_add_executable(StageRehearsal
     src/render/dialogs/CreateObjectDialog.cpp
     src/render/SettingsWindow.h
     src/render/SettingsWindow.cpp
+    src/render/PrepAreaCanvas.h
+    src/render/PrepAreaCanvas.cpp
     src/render/StartDialog.h
     src/render/StartDialog.cpp
     src/render/TimelineWidget.h
@@ -120,6 +122,7 @@ add_executable(InteractionSelfTest
     src/render/TimelineWidget.cpp
     src/render/dialogs/CreateObjectDialog.cpp
     src/render/SettingsWindow.cpp
+    src/render/PrepAreaCanvas.cpp
     src/render/StartDialog.cpp
 )
 

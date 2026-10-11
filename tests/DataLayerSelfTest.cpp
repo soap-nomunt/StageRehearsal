@@ -19,6 +19,10 @@
 // 阶段8：AppSettings 最近使用列表（MRU：追加置顶 / 大小写不敏感去重 / 超 10 条
 // 截断 / removeRecentFile / 跨实例读回）；RuntimeData::openFile/saveFile 成功
 // 入 MRU、openFile 失败不入。
+// 阶段10：存档 v2——台下准备区 PrepAreaData（往返逐字段一致 / v1 存档迁移为
+// 空列表 / version 受理区间 [1,2] / 非法字段拒载）；EditorCore::setPrepAreas /
+// addPrepArea / removePrepArea 直改直提交（校验拒绝 / 自动命名递增 / 不入
+// 撤销栈 / undo 不影响准备区）。
 #include "business/Commands.h"
 #include "business/EditorCore.h"
 #include "business/KeyframeCommands.h"
@@ -75,7 +79,8 @@ bool writeTextFile(const QString& path, const QByteArray& content)
     return file.write(content) == content.size();
 }
 
-// 构造一份带自定义数值的数据：舞台 / 演员（3 关键帧）/ 屏风（size + 2 关键帧）/ 2 个场次标签。
+// 构造一份带自定义数值的数据：舞台 / 演员（3 关键帧）/ 屏风（size + 2 关键帧）/
+// 2 个准备区（阶段10）/ 2 个场次标签。
 // 数值均取二进制可精确表示的“整齐”值，保证 double 严格相等。
 FileData makeSampleData()
 {
@@ -107,6 +112,25 @@ FileData makeSampleData()
         { 7.25, -50.0, 150.0, 0.0 },
     };
     data.objects.append(screen);
+
+    // 台下准备区（阶段10）：舞台左外侧 / 台下各一
+    PrepAreaData prep1;
+    prep1.id = QStringLiteral("prep-001");
+    prep1.name = QStringLiteral("准备区1");
+    prep1.x = -1050.0;
+    prep1.y = 450.0;
+    prep1.width = 400.0;
+    prep1.height = 300.0;
+    data.prepAreas.append(prep1);
+
+    PrepAreaData prep2;
+    prep2.id = QStringLiteral("prep-002");
+    prep2.name = QStringLiteral("准备区2");
+    prep2.x = 0.0;
+    prep2.y = 1150.0;
+    prep2.width = 600.0;
+    prep2.height = 400.0;
+    data.prepAreas.append(prep2);
 
     data.timeline.duration = 90.5;
     data.timeline.labels = {
@@ -1406,6 +1430,8 @@ void testRoundTrip(QTemporaryDir& dir)
     CHECK(loaded.stage == original.stage, "StageData 逐字段一致");
     CHECK(loaded.objects.size() == 2, "对象数量一致（演员+屏风）");
     CHECK(loaded.objects == original.objects, "ObjectData（含关键帧、屏风 size）逐字段一致");
+    CHECK(loaded.prepAreas.size() == 2, "准备区数量一致");
+    CHECK(loaded.prepAreas == original.prepAreas, "PrepAreaData（id/name/x/y/宽高）逐字段一致");
     CHECK(loaded.timeline == original.timeline, "TimelineData（含场次标签）逐字段一致");
     CHECK(loaded == original, "FileData 整体一致");
 }
@@ -1426,16 +1452,25 @@ void testCorruptedFile(QTemporaryDir& dir)
     CHECK(!arrayResult.ok() && arrayResult.error == LoadError::Parse, "根节点为数组返回 LoadError::Parse");
 }
 
+// 阶段10 改写：版本受理区间 [1, 2]——v3（未来版本）拒载；v1 存档（无 prepAreas
+// 节点）宽容迁移为 prepAreas 空列表（仿 testParentGroupJson 的剥字段兼容模式）
 void testVersionMismatch(QTemporaryDir& dir)
 {
     QJsonObject root = JsonStore::toJson(FileData::createDefault());
 
-    root[QStringLiteral("version")] = 2;
-    const QString futurePath = dir.filePath(QStringLiteral("v2.json"));
+    root[QStringLiteral("version")] = 3;
+    const QString futurePath = dir.filePath(QStringLiteral("v3.json"));
     writeTextFile(futurePath, QJsonDocument(root).toJson());
     const LoadResult futureResult = JsonStore::load(futurePath);
     CHECK(!futureResult.ok() && futureResult.error == LoadError::UnsupportedVersion,
-          "version=2 返回 LoadError::UnsupportedVersion");
+          "version=3（高于当前）返回 LoadError::UnsupportedVersion");
+
+    root[QStringLiteral("version")] = 0;
+    const QString lowPath = dir.filePath(QStringLiteral("v0.json"));
+    writeTextFile(lowPath, QJsonDocument(root).toJson());
+    const LoadResult lowResult = JsonStore::load(lowPath);
+    CHECK(!lowResult.ok() && lowResult.error == LoadError::UnsupportedVersion,
+          "version=0（低于受理区间）返回 LoadError::UnsupportedVersion");
 
     root.remove(QStringLiteral("version"));
     const QString missingPath = dir.filePath(QStringLiteral("noversion.json"));
@@ -1443,6 +1478,48 @@ void testVersionMismatch(QTemporaryDir& dir)
     const LoadResult missingResult = JsonStore::load(missingPath);
     CHECK(!missingResult.ok() && missingResult.error == LoadError::UnsupportedVersion,
           "version 缺失返回 LoadError::UnsupportedVersion");
+
+    // v1 存档迁移：真实构造一份无 prepAreas 节点的 JSON（toJson 恒写 prepAreas，
+    // 须剥掉该节点模拟 v1 存档）
+    QJsonObject v1 = JsonStore::toJson(makeSampleData());
+    v1[QStringLiteral("version")] = 1;
+    v1.remove(QStringLiteral("prepAreas"));
+    const QString v1Path = dir.filePath(QStringLiteral("v1-legacy.json"));
+    writeTextFile(v1Path, QJsonDocument(v1).toJson());
+    const LoadResult v1Result = JsonStore::load(v1Path);
+    CHECK(v1Result.ok(), "v1 存档（无 prepAreas 节点）加载成功：" + v1Result.message);
+    if (v1Result.ok()) {
+        CHECK(v1Result.data.version == kFileDataVersion, "v1 迁移后版本号升到当前版本");
+        CHECK(v1Result.data.prepAreas.isEmpty(), "v1 迁移：prepAreas 缺省为空列表");
+        CHECK(v1Result.data.objects == makeSampleData().objects,
+              "v1 迁移：对象数据不受影响");
+    }
+
+    // v2 存档 prepAreas 字段非法 → 严格校验报错而非崩溃
+    QJsonObject badPrep = JsonStore::toJson(FileData::createDefault());
+    QJsonArray badAreas;
+    QJsonObject badArea;
+    badArea[QStringLiteral("id")] = QStringLiteral("prep-001");
+    badArea[QStringLiteral("name")] = QStringLiteral("准备区1");
+    badArea[QStringLiteral("x")] = 0.0;
+    badArea[QStringLiteral("y")] = 0.0;
+    badArea[QStringLiteral("width")] = -100.0; // 宽 ≤ 0 非法
+    badArea[QStringLiteral("height")] = 300.0;
+    badAreas.append(badArea);
+    badPrep[QStringLiteral("prepAreas")] = badAreas;
+    const QString badPath = dir.filePath(QStringLiteral("badprep.json"));
+    writeTextFile(badPath, QJsonDocument(badPrep).toJson());
+    const LoadResult badResult = JsonStore::load(badPath);
+    CHECK(!badResult.ok() && badResult.error == LoadError::InvalidData,
+          "准备区宽 ≤ 0 返回 LoadError::InvalidData");
+
+    QJsonObject notArray = JsonStore::toJson(FileData::createDefault());
+    notArray[QStringLiteral("prepAreas")] = 42;
+    const QString notArrayPath = dir.filePath(QStringLiteral("notarray.json"));
+    writeTextFile(notArrayPath, QJsonDocument(notArray).toJson());
+    const LoadResult notArrayResult = JsonStore::load(notArrayPath);
+    CHECK(!notArrayResult.ok() && notArrayResult.error == LoadError::InvalidData,
+          "prepAreas 非数组返回 LoadError::InvalidData");
 }
 
 void testMissingFile(QTemporaryDir& dir)
@@ -1671,6 +1748,116 @@ void testStageSettings()
     CHECK(!core.canUndo(), "setStage 测试：撤销后栈空（无舞台条目残留）");
 }
 
+// 阶段10：台下准备区——EditorCore::setPrepAreas/addPrepArea/removePrepArea
+// 与 setStage 同例的直改直提交语义：校验拒绝（宽高 ≤ 0、id/name 重复）、
+// 自动命名唯一递增、不入撤销栈、dirty 置位、undo 不影响准备区；
+// JsonStore 迁移与往返由 testVersionMismatch/testRoundTrip 覆盖
+void testPrepAreas()
+{
+    CHECK(FileData::createDefault().prepAreas.isEmpty(),
+          "createDefault：准备区为空列表");
+
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+
+    int emissions = 0;
+    QObject::connect(&runtime, &RuntimeData::fileDataChanged, &runtime,
+                     [&emissions] { ++emissions; });
+
+    // ---- addPrepArea：自动 id/命名递增、默认 400×300、落点正确 ----
+    const QString id1 = core.addPrepArea(-1050.0, 450.0);
+    CHECK(!id1.isEmpty(), "addPrepArea 返回新 id");
+    CHECK(runtime.fileData().prepAreas.size() == 1, "addPrepArea 经直改提交回数据层");
+    CHECK(emissions == 1, "addPrepArea 发出一次 fileDataChanged");
+    {
+        const PrepAreaData& area = runtime.fileData().prepAreas.first();
+        CHECK(area.id == id1 && area.id == QStringLiteral("prep-001"),
+              "addPrepArea 生成 prep-NNN 格式 id");
+        CHECK(area.name == QStringLiteral("准备区1"), "addPrepArea 自动命名（准备区1）");
+        CHECK(area.width == 400.0 && area.height == 300.0, "addPrepArea 默认 400×300");
+        CHECK(area.x == -1050.0 && area.y == 450.0, "addPrepArea 中心落在指定坐标");
+        CHECK(core.findPrepArea(id1) == &runtime.fileData().prepAreas.first(),
+              "findPrepArea 命中");
+    }
+
+    const QString id2 = core.addPrepArea(0.0, 1150.0);
+    CHECK(runtime.fileData().prepAreas.at(1).name == QStringLiteral("准备区2"),
+          "addPrepArea 命名按现存最大 N+1（准备区2）");
+    CHECK(runtime.fileData().prepAreas.at(1).id == QStringLiteral("prep-002"),
+          "addPrepArea id 递增查空（prep-002）");
+
+    // ---- setPrepAreas 校验拒绝：宽高 ≤ 0、id/name 重复、空 id/名 ----
+    QList<PrepAreaData> current = runtime.fileData().prepAreas;
+    const int before = emissions;
+
+    QList<PrepAreaData> badSize = current;
+    badSize[0].width = 0.0;
+    CHECK(!core.setPrepAreas(badSize), "setPrepAreas 拒绝宽 ≤ 0");
+    badSize = current;
+    badSize[1].height = -10.0;
+    CHECK(!core.setPrepAreas(badSize), "setPrepAreas 拒绝高 ≤ 0");
+    QList<PrepAreaData> dupId = current;
+    dupId[1].id = current.first().id;
+    CHECK(!core.setPrepAreas(dupId), "setPrepAreas 拒绝 id 重复");
+    QList<PrepAreaData> dupName = current;
+    dupName[1].name = current.first().name;
+    CHECK(!core.setPrepAreas(dupName), "setPrepAreas 拒绝 name 重复");
+    QList<PrepAreaData> emptyId = current;
+    emptyId[0].id.clear();
+    CHECK(!core.setPrepAreas(emptyId), "setPrepAreas 拒绝空 id");
+    QList<PrepAreaData> emptyName = current;
+    emptyName[0].name.clear();
+    CHECK(!core.setPrepAreas(emptyName), "setPrepAreas 拒绝空 name");
+    CHECK(emissions == before && !core.canUndo(),
+          "非法 setPrepAreas：不改数据、不发信号、不动撤销栈");
+
+    // ---- setPrepAreas：无变更不提交；合法修改生效（模拟设置页移动/改宽高） ----
+    CHECK(!core.setPrepAreas(current), "setPrepAreas 无变更不提交（返回 false）");
+    CHECK(emissions == before, "setPrepAreas 无变更不发 fileDataChanged");
+
+    QList<PrepAreaData> moved = current;
+    moved[0].x = -1000.0;
+    moved[0].width = 500.0;
+    CHECK(core.setPrepAreas(moved), "setPrepAreas 合法修改生效");
+    CHECK(runtime.fileData().prepAreas.first().x == -1000.0
+              && runtime.fileData().prepAreas.first().width == 500.0,
+          "setPrepAreas 提交回数据层");
+    CHECK(emissions == before + 1, "setPrepAreas 发出一次 fileDataChanged");
+    CHECK(!core.canUndo(), "setPrepAreas 不产生撤销条目（canUndo 不变）");
+    CHECK(runtime.isDirty(), "准备区修改弄脏文件（dirty 置位）");
+
+    // ---- undo 不影响准备区：对象命令入栈 → 改准备区 → undo 只撤对象 ----
+    CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "准备区测试：创建演员入撤销栈");
+    CHECK(core.canUndo(), "准备区测试：对象命令可撤销");
+    const QString id3 = core.addPrepArea(500.0, 500.0);
+    CHECK(id3 == QStringLiteral("prep-003")
+              && runtime.fileData().prepAreas.size() == 3,
+          "入栈后新建准备区（prep-003）");
+    CHECK(core.undo(), "准备区测试：undo 撤掉对象命令");
+    CHECK(runtime.fileData().objects.isEmpty(), "准备区测试：undo 移除新建对象");
+    CHECK(runtime.fileData().prepAreas.size() == 3,
+          "准备区测试：undo 不影响准备区（仍在列表）");
+    CHECK(!core.canUndo(), "准备区测试：撤销后栈空（无准备区条目残留）");
+
+    // ---- 命名递增按现存最大 N：删掉 准备区2 再新建，不与现存重名 ----
+    CHECK(core.removePrepArea(id2), "removePrepArea 成功");
+    CHECK(runtime.fileData().prepAreas.size() == 2
+              && core.findPrepArea(id2) == nullptr,
+          "removePrepArea 从数据层移除");
+    const QString id4 = core.addPrepArea(0.0, 0.0);
+    CHECK(runtime.fileData().prepAreas.last().name == QStringLiteral("准备区4"),
+          "删中间项后命名仍按现存最大 N+1（准备区4，不回填）");
+    QSet<QString> names;
+    bool unique = true;
+    for (const PrepAreaData& area : runtime.fileData().prepAreas) {
+        unique = unique && !names.contains(area.name);
+        names.insert(area.name);
+    }
+    CHECK(unique, "准备区名全局唯一");
+    CHECK(!core.removePrepArea(QStringLiteral("prep-999")), "removePrepArea 不存在 id 拒绝");
+    Q_UNUSED(id4);
+}
+
 // 阶段8：AppSettings 最近使用列表（MRU）语义 + RuntimeData 记录时机。
 // MRU 哨兵在用例开头/结尾清理，避免残留影响下次运行
 void testRecentFiles(QTemporaryDir& dir)
@@ -1816,6 +2003,7 @@ int main(int argc, char* argv[])
     testRuntimeData(dir);
     testDirtyTracking(dir);
     testStageSettings();
+    testPrepAreas();
     testUndoStack(dir);
     testUndoRedoSequence();
     testRecentFiles(dir);

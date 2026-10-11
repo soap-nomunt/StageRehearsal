@@ -506,6 +506,106 @@ bool EditorCore::setStage(const StageData& stage)
     return true;
 }
 
+// ---- 台下准备区（阶段10）----
+
+const PrepAreaData* EditorCore::findPrepArea(const QString& id) const
+{
+    for (const PrepAreaData& area : m_runtimeData->fileData().prepAreas) {
+        if (area.id == id)
+            return &area;
+    }
+    return nullptr;
+}
+
+bool EditorCore::setPrepAreas(const QList<PrepAreaData>& prepAreas)
+{
+    QSet<QString> ids;
+    QSet<QString> names;
+    for (const PrepAreaData& area : prepAreas) {
+        if (area.id.isEmpty() || area.name.isEmpty())
+            return false; // id/name 必须非空
+        if (area.width <= 0.0 || area.height <= 0.0)
+            return false; // 非法尺寸拒绝
+        if (ids.contains(area.id) || names.contains(area.name))
+            return false; // id/name 全局唯一
+        ids.insert(area.id);
+        names.insert(area.name);
+    }
+    FileData working = m_runtimeData->fileData();
+    if (working.prepAreas == prepAreas)
+        return false; // 无变更不提交
+    // 与 setStage 同例：只能在设置窗口调整，不入撤销栈；直改直提交，
+    // dirty 跟踪与 fileDataChanged 刷新路径与命令提交一致
+    working.prepAreas = prepAreas;
+    m_runtimeData->commitFileData(working);
+    return true;
+}
+
+QString EditorCore::addPrepArea(double x, double y)
+{
+    const QList<PrepAreaData>& existing = m_runtimeData->fileData().prepAreas;
+
+    // 唯一 id：prep-NNN 递增查空（与对象 id 同惯例）
+    QSet<QString> takenIds;
+    for (const PrepAreaData& area : existing)
+        takenIds.insert(area.id);
+    int maxNumber = 0;
+    for (const QString& id : takenIds) {
+        if (id.startsWith(QLatin1String("prep-"))) {
+            bool ok = false;
+            const int number = id.mid(5).toInt(&ok);
+            if (ok)
+                maxNumber = qMax(maxNumber, number);
+        }
+    }
+    QString newId;
+    do {
+        newId = QStringLiteral("prep-%1").arg(++maxNumber, 3, 10, QLatin1Char('0'));
+    } while (takenIds.contains(newId));
+
+    // 唯一名：准备区N，按现存最大 N+1（与 id 编号各自独立递增）
+    int maxNameNumber = 0;
+    const QString stem = QStringLiteral("准备区");
+    for (const PrepAreaData& area : existing) {
+        if (area.name.startsWith(stem)) {
+            bool ok = false;
+            const int number = area.name.mid(stem.size()).toInt(&ok);
+            if (ok)
+                maxNameNumber = qMax(maxNameNumber, number);
+        }
+    }
+    QSet<QString> takenNames;
+    for (const PrepAreaData& area : existing)
+        takenNames.insert(area.name);
+    QString newName;
+    do {
+        newName = stem + QString::number(++maxNameNumber);
+    } while (takenNames.contains(newName));
+
+    PrepAreaData area;
+    area.id = newId;
+    area.name = newName;
+    area.x = x;
+    area.y = y; // 默认 400×300 取 PrepAreaData 成员默认值
+    QList<PrepAreaData> next = existing;
+    next.append(area);
+    if (!setPrepAreas(next))
+        return QString();
+    return newId;
+}
+
+bool EditorCore::removePrepArea(const QString& id)
+{
+    QList<PrepAreaData> next = m_runtimeData->fileData().prepAreas;
+    for (qsizetype i = 0; i < next.size(); ++i) {
+        if (next.at(i).id == id) {
+            next.removeAt(i);
+            return setPrepAreas(next);
+        }
+    }
+    return false; // 不存在
+}
+
 // ---- 内部工具 ----
 
 QString EditorCore::nextFreeId(ObjectType type, QSet<QString>& taken) const

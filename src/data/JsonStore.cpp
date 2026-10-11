@@ -49,6 +49,18 @@ QJsonObject objectToJson(const ObjectData& o)
     return obj;
 }
 
+QJsonObject prepAreaToJson(const PrepAreaData& p)
+{
+    QJsonObject obj;
+    obj[QStringLiteral("id")] = p.id;
+    obj[QStringLiteral("name")] = p.name;
+    obj[QStringLiteral("x")] = p.x;
+    obj[QStringLiteral("y")] = p.y;
+    obj[QStringLiteral("width")] = p.width;
+    obj[QStringLiteral("height")] = p.height;
+    return obj;
+}
+
 // ---- 解析辅助（全部先查类型再取值，任何畸形输入都不崩溃） ----
 
 LoadResult invalid(const QString& message)
@@ -192,6 +204,33 @@ bool parseTimeline(const QJsonValue& value, TimelineData& out)
     return true;
 }
 
+bool parsePrepArea(const QJsonValue& value, PrepAreaData& out, QString& error)
+{
+    if (!value.isObject()) {
+        error = QStringLiteral("prepAreas 数组元素不是对象");
+        return false;
+    }
+    const QJsonObject obj = value.toObject();
+    if (!readString(obj, QStringLiteral("id"), out.id)
+        || !readString(obj, QStringLiteral("name"), out.name)
+        || !readDouble(obj, QStringLiteral("x"), out.x)
+        || !readDouble(obj, QStringLiteral("y"), out.y)
+        || !readDouble(obj, QStringLiteral("width"), out.width)
+        || !readDouble(obj, QStringLiteral("height"), out.height)) {
+        error = QStringLiteral("准备区缺少 id/name/x/y/width/height 字段");
+        return false;
+    }
+    if (out.id.isEmpty() || out.name.isEmpty()) {
+        error = QStringLiteral("准备区 id/name 不能为空");
+        return false;
+    }
+    if (out.width <= 0.0 || out.height <= 0.0) {
+        error = QStringLiteral("准备区 %1 的宽高必须 > 0").arg(out.id);
+        return false;
+    }
+    return true;
+}
+
 } // namespace
 
 QJsonObject JsonStore::toJson(const FileData& data)
@@ -210,6 +249,12 @@ QJsonObject JsonStore::toJson(const FileData& data)
         objects.append(objectToJson(o));
     root[QStringLiteral("objects")] = objects;
 
+    // v2 起恒写（空列表也写空数组）：台下准备区布局
+    QJsonArray prepAreas;
+    for (const PrepAreaData& p : data.prepAreas)
+        prepAreas.append(prepAreaToJson(p));
+    root[QStringLiteral("prepAreas")] = prepAreas;
+
     QJsonObject timeline;
     timeline[QStringLiteral("duration")] = data.timeline.duration;
     QJsonArray labels;
@@ -227,10 +272,14 @@ QJsonObject JsonStore::toJson(const FileData& data)
 
 LoadResult JsonStore::fromJson(const QJsonObject& root)
 {
+    // 版本受理区间 [1, currentVersion]：低版本存档宽容迁移（v1 无 prepAreas 节点，
+    // 迁移为空列表），高于当前版本（未来存档）拒载
     const QJsonValue versionValue = root.value(QStringLiteral("version"));
-    if (!versionValue.isDouble() || versionValue.toDouble() != static_cast<double>(currentVersion)) {
+    if (!versionValue.isDouble() || versionValue.toDouble() < 1.0
+        || versionValue.toDouble() > static_cast<double>(currentVersion)) {
         return { LoadError::UnsupportedVersion,
-                 QStringLiteral("存档版本缺失或不受支持（当前支持 version %1）").arg(currentVersion),
+                 QStringLiteral("存档版本缺失或不受支持（当前支持 version 1～%1）")
+                     .arg(currentVersion),
                  {} };
     }
 
@@ -257,6 +306,21 @@ LoadResult JsonStore::fromJson(const QJsonObject& root)
         if (!parseObject(entry, obj, error))
             return invalid(error);
         data.objects.append(obj);
+    }
+
+    // prepAreas（v2 新增）：节点缺失宽容为空列表（v1 存档迁移）；
+    // 存在则必须是数组且逐字段严格校验（沿用 parent/keyframes 缺省宽容先例）
+    const QJsonValue prepAreasValue = root.value(QStringLiteral("prepAreas"));
+    if (!prepAreasValue.isUndefined()) {
+        if (!prepAreasValue.isArray())
+            return invalid(QStringLiteral("prepAreas 不是数组"));
+        for (const QJsonValue& entry : prepAreasValue.toArray()) {
+            PrepAreaData area;
+            QString error;
+            if (!parsePrepArea(entry, area, error))
+                return invalid(error);
+            data.prepAreas.append(area);
+        }
     }
 
     const QJsonValue timelineValue = root.value(QStringLiteral("timeline"));

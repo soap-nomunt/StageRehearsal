@@ -45,6 +45,11 @@
 // 关闭项目追加：文件菜单"关闭项目(&C)"——过未保存门卫后回启动页（门卫取消留在
 // 原项目且不弹启动页；启动页选空项目则运行时重置为默认空舞台、撤销栈清空、
 // 主窗口重新显示；不脏时直弹启动页无门卫弹窗；启动页取消 = 退出程序，列手测）。
+// 阶段10 追加：台下准备区——设置页"舞台与准备区"方块编辑器（PrepAreaCanvas）：
+// 右键空白新建（QMenu::exec 模态菜单经 QTimer 驱动）/ 合成拖拽松开单次提交
+// （50cm 吸附）/ 右键删除 / 选中联动属性行启用态与回显 / editingFinished 提交 /
+// 舞台方块不可拖；主视口只读渲染（背景层无图元）与 resetView 含准备区；
+// 画布与视口 grab 截图存档人工复核。
 //
 // 运行（Git Bash，项目根目录）：
 //   QT_QPA_PLATFORM=offscreen ./build/Debug/InteractionSelfTest.exe
@@ -55,6 +60,7 @@
 #include "business/TimelinePlayer.h"
 #include "data/RuntimeData.h"
 #include "render/MainWindow.h"
+#include "render/PrepAreaCanvas.h"
 #include "render/SettingsWindow.h"
 #include "render/StageObjectItem.h"
 #include "render/StageScene.h"
@@ -74,6 +80,7 @@
 #include <QDoubleSpinBox>
 #include <QDropEvent>
 #include <QFile>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -1892,6 +1899,278 @@ int main(int argc, char* argv[])
         action11->trigger();
         CHECK(!guardAppeared && w11.isVisible() && runtime11->fileData().objects.isEmpty(),
               "关闭项目：不脏直回启动页（无门卫弹窗）");
+    }
+
+    // ==================== 阶段10：台下准备区（设置页方块编辑器 + 主视口只读渲染） ====================
+    {
+        // 干净起点：新窗口 + 默认空舞台（1200×800，无准备区）
+        MainWindow w12;
+        w12.show();
+        QTest::qWaitForWindowExposed(&w12);
+        auto* core12 = w12.findChild<EditorCore*>();
+        auto* runtime12 = w12.findChild<RuntimeData*>();
+        CHECK(runtime12->fileData().prepAreas.isEmpty(), "阶段10：默认空舞台无准备区");
+
+        QAction* settingsAction12 = nullptr;
+        for (QAction* action : w12.findChildren<QAction*>()) {
+            if (action->text() == QStringLiteral("设置(&T)"))
+                settingsAction12 = action;
+        }
+        settingsAction12->trigger();
+        SettingsWindow* sw12 = w12.findChild<SettingsWindow*>();
+        auto* canvas12 = sw12->findChild<PrepAreaCanvas*>(QStringLiteral("prepAreaCanvas"));
+        auto* widthSpin12 = sw12->findChild<QDoubleSpinBox*>(QStringLiteral("stageWidthSpin"));
+        auto* colorButton12 = sw12->findChild<QPushButton*>(QStringLiteral("stageColorButton"));
+        auto* prepWidthSpin12 = sw12->findChild<QDoubleSpinBox*>(QStringLiteral("prepWidthSpin"));
+        auto* prepHeightSpin12 = sw12->findChild<QDoubleSpinBox*>(QStringLiteral("prepHeightSpin"));
+        CHECK(canvas12 && widthSpin12 && colorButton12 && prepWidthSpin12 && prepHeightSpin12,
+              "阶段10：方块编辑器与准备区属性行装配完整");
+
+        // 初始选中舞台：舞台属性行可用、准备区行禁用
+        CHECK(canvas12->selectedBlockId() == PrepAreaCanvas::stageBlockId(),
+              "阶段10：初始选中舞台方块");
+        CHECK(widthSpin12->isEnabled() && colorButton12->isEnabled()
+                  && !prepWidthSpin12->isEnabled() && !prepHeightSpin12->isEnabled(),
+              "阶段10：选中舞台时舞台属性行可用、准备区属性行禁用");
+
+        // 由舞台方块像素矩形（场景 1200×800，左上 (-600,0)）推导画布当前缩放/原点，
+        // 供"落点 ≈ 右键处"容差断言（像素取整误差远小于 50cm 吸附网格）
+        const QRect stagePx12 = canvas12->blockRectFor(PrepAreaCanvas::stageBlockId());
+        CHECK(!stagePx12.isEmpty(), "阶段10：自测钩子 blockRectFor 返回舞台像素矩形");
+        const double scale12 = stagePx12.width() / 1200.0;
+        const QPointF origin12 = QPointF(stagePx12.left(), stagePx12.top())
+            - QPointF(-600.0, 0.0) * scale12; // 场景原点的画布像素位置
+        const auto sceneAt = [origin12, scale12](const QPoint& px) {
+            return QPointF((px.x() - origin12.x()) / scale12,
+                           (px.y() - origin12.y()) / scale12);
+        };
+
+        int fileSignals12 = 0;
+        QObject::connect(runtime12, &RuntimeData::fileDataChanged, runtime12,
+                         [&fileSignals12] { ++fileSignals12; });
+
+        // ---- 右键空白 → 新建准备区（QMenu::exec 模态菜单经 QTimer 驱动） ----
+        // offscreen 下 QAction::trigger 不会让 exec 返回；实测可用路径 =
+        // setActiveAction + 回车（与手写菜单探针验证一致）
+        const auto pickFirstMenuAction = [] {
+            if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                menu->setActiveAction(menu->actions().first());
+                QTest::keyClick(menu, Qt::Key_Return);
+            }
+        };
+        QTimer::singleShot(200, pickFirstMenuAction);
+        // 舞台方块居中绘制、四周留边 ≥24px：底边中点下方必为空白
+        const QPoint blankPos12(canvas12->width() / 2, canvas12->height() - 8);
+        QContextMenuEvent blankEvt(QContextMenuEvent::Mouse, blankPos12,
+                                   canvas12->mapToGlobal(blankPos12));
+        QApplication::sendEvent(canvas12, &blankEvt);
+        CHECK(runtime12->fileData().prepAreas.size() == 1, "阶段10：右键空白新建准备区");
+        {
+            const PrepAreaData& area = runtime12->fileData().prepAreas.first();
+            CHECK(area.name == QStringLiteral("准备区1"), "阶段10：自动命名“准备区1”");
+            CHECK(area.width == 400.0 && area.height == 300.0, "阶段10：默认 400×300");
+            CHECK(std::fmod(area.x, 50.0) == 0.0 && std::fmod(area.y, 50.0) == 0.0,
+                  "阶段10：新建位置吸附 50cm 网格");
+            const QPointF expected = sceneAt(blankPos12);
+            CHECK(qAbs(area.x - expected.x()) < 30.0 && qAbs(area.y - expected.y()) < 30.0,
+                  "阶段10：新建落在右键处（吸附容差内）");
+        }
+        // 新建后自动选中：准备区属性行可用并回显、舞台属性行禁用
+        CHECK(canvas12->selectedBlockId() == runtime12->fileData().prepAreas.first().id,
+              "阶段10：新建后自动选中新准备区");
+        CHECK(prepWidthSpin12->isEnabled() && prepHeightSpin12->isEnabled()
+                  && !widthSpin12->isEnabled() && !colorButton12->isEnabled(),
+              "阶段10：选中准备区时属性行启用态联动");
+        CHECK(near(prepWidthSpin12->value(), 400.0, 0.01)
+                  && near(prepHeightSpin12->value(), 300.0, 0.01),
+              "阶段10：选中准备区回显宽高");
+
+        // ---- 合成拖拽：拖动中不提交（本地预览），松开单次提交且坐标吸附 ----
+        const QString prepId12 = runtime12->fileData().prepAreas.first().id;
+        const PrepAreaData beforeDrag = runtime12->fileData().prepAreas.first();
+        const QRect prepPx12 = canvas12->blockRectFor(prepId12);
+        CHECK(!prepPx12.isEmpty(), "阶段10：准备区方块像素矩形可求");
+        // 新建后内容包围盒已变（画布变换重算）：按当前舞台像素矩形重推导变换
+        const QRect stagePxNow = canvas12->blockRectFor(PrepAreaCanvas::stageBlockId());
+        const double scaleNow = stagePxNow.width() / 1200.0;
+        const QPointF originNow = QPointF(stagePxNow.left(), stagePxNow.top())
+            - QPointF(-600.0, 0.0) * scaleNow;
+        const auto sceneAtNow = [originNow, scaleNow](const QPoint& px) {
+            return QPointF((px.x() - originNow.x()) / scaleNow,
+                           (px.y() - originNow.y()) / scaleNow);
+        };
+        const int signalsBeforeDrag = fileSignals12;
+        QTest::mousePress(canvas12, Qt::LeftButton, Qt::NoModifier, prepPx12.center());
+        QTest::mouseMove(canvas12, prepPx12.center() + QPoint(60, 30)); // 越过拖动阈值
+        QTest::mouseMove(canvas12, prepPx12.center() + QPoint(120, 60));
+        CHECK(fileSignals12 == signalsBeforeDrag, "阶段10：拖动中不提交（本地预览）");
+        QTest::mouseRelease(canvas12, Qt::LeftButton, Qt::NoModifier,
+                            prepPx12.center() + QPoint(120, 60));
+        CHECK(fileSignals12 == signalsBeforeDrag + 1, "阶段10：拖拽松开单次提交");
+        {
+            const PrepAreaData& area = runtime12->fileData().prepAreas.first();
+            CHECK(std::fmod(area.x, 50.0) == 0.0 && std::fmod(area.y, 50.0) == 0.0,
+                  "阶段10：拖拽落点吸附 50cm 网格");
+            CHECK(area.x != beforeDrag.x || area.y != beforeDrag.y, "阶段10：拖拽改变了位置");
+            const QPointF expected = sceneAtNow(prepPx12.center() + QPoint(120, 60));
+            CHECK(qAbs(area.x - expected.x()) < 30.0 && qAbs(area.y - expected.y()) < 30.0,
+                  "阶段10：拖拽落点 ≈ 松开处（吸附容差内）");
+        }
+        CHECK(!core12->canUndo(), "阶段10：准备区拖拽不产生撤销条目");
+        CHECK(runtime12->isDirty(), "阶段10：准备区拖拽弄脏文件");
+
+        // ---- 数值行调整：setValue 不即时提交，editingFinished 直改直提交 ----
+        prepWidthSpin12->setValue(500.0);
+        prepHeightSpin12->setValue(350.0);
+        CHECK(near(runtime12->fileData().prepAreas.first().width, 400.0, 0.01),
+              "阶段10：准备区数值 setValue 不即时提交");
+        prepWidthSpin12->editingFinished();
+        CHECK(near(runtime12->fileData().prepAreas.first().width, 500.0, 0.01)
+                  && near(runtime12->fileData().prepAreas.first().height, 350.0, 0.01),
+              "阶段10：editingFinished 提交准备区宽高（直改直提交）");
+        CHECK(near(prepWidthSpin12->value(), 500.0, 0.01),
+              "阶段10：提交后数值行回显同步");
+        CHECK(!core12->canUndo(), "阶段10：准备区数值调整不产生撤销条目");
+
+        // 画布截图存档人工复核（准备区选中高亮 + 名称/尺寸两行文字）
+        canvas12->grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage10-settings-prepareas.png")));
+
+        // ---- 选中舞台方块：属性行联动反向 ----
+        QTest::mouseClick(canvas12, Qt::LeftButton, Qt::NoModifier,
+                          canvas12->blockRectFor(PrepAreaCanvas::stageBlockId()).center());
+        CHECK(canvas12->selectedBlockId() == PrepAreaCanvas::stageBlockId(),
+              "阶段10：点击舞台方块选中舞台");
+        CHECK(widthSpin12->isEnabled() && colorButton12->isEnabled()
+                  && !prepWidthSpin12->isEnabled(),
+              "阶段10：选中舞台后舞台属性行恢复可用、准备区行禁用");
+
+        // ---- 舞台方块不可拖：拖后数据不变、无提交 ----
+        const StageData stageBefore12 = runtime12->fileData().stage;
+        const int signalsBeforeStageDrag = fileSignals12;
+        const QRect stagePxDrag = canvas12->blockRectFor(PrepAreaCanvas::stageBlockId());
+        QTest::mousePress(canvas12, Qt::LeftButton, Qt::NoModifier, stagePxDrag.center());
+        QTest::mouseMove(canvas12, stagePxDrag.center() + QPoint(80, 40));
+        QTest::mouseRelease(canvas12, Qt::LeftButton, Qt::NoModifier,
+                            stagePxDrag.center() + QPoint(80, 40));
+        CHECK(runtime12->fileData().stage == stageBefore12
+                  && fileSignals12 == signalsBeforeStageDrag,
+              "阶段10：舞台方块不响应拖动（centerOffset 不变、无提交）");
+
+        // ---- 右键准备区 → 删除（QTimer 驱动菜单） ----
+        const QRect prepPxDel = canvas12->blockRectFor(prepId12);
+        QTimer::singleShot(200, pickFirstMenuAction); // “删除”
+        QContextMenuEvent prepEvt(QContextMenuEvent::Mouse, prepPxDel.center(),
+                                  canvas12->mapToGlobal(prepPxDel.center()));
+        QApplication::sendEvent(canvas12, &prepEvt);
+        CHECK(runtime12->fileData().prepAreas.isEmpty(), "阶段10：右键准备区删除后列表清空");
+        CHECK(canvas12->selectedBlockId() == PrepAreaCanvas::stageBlockId(),
+              "阶段10：删除后选中回落舞台");
+        CHECK(widthSpin12->isEnabled() && !prepWidthSpin12->isEnabled(),
+              "阶段10：删除后舞台属性行恢复可用");
+
+        // ---- 右键舞台方块：无菜单 ----
+        bool popupAppeared12 = false;
+        QTimer popupGuard12;
+        popupGuard12.setSingleShot(true);
+        QObject::connect(&popupGuard12, &QTimer::timeout, [&popupAppeared12] {
+            if (QWidget* popup = QApplication::activePopupWidget()) {
+                popupAppeared12 = true;
+                popup->close(); // 防御：不应出现菜单，出现则关闭避免卡住
+            }
+        });
+        popupGuard12.start(200);
+        const QRect stagePxMenu = canvas12->blockRectFor(PrepAreaCanvas::stageBlockId());
+        QContextMenuEvent stageEvt(QContextMenuEvent::Mouse, stagePxMenu.center(),
+                                   canvas12->mapToGlobal(stagePxMenu.center()));
+        QApplication::sendEvent(canvas12, &stageEvt);
+        popupGuard12.stop(); // 未弹菜单则取消守卫定时器
+        CHECK(!popupAppeared12, "阶段10：右键舞台方块无菜单");
+
+        sw12->close();
+    }
+
+    // ---- 主视口只读渲染 + resetView 含准备区（示例存档 v2） ----
+    {
+        MainWindow w13;
+        w13.show();
+        QTest::qWaitForWindowExposed(&w13);
+        CHECK(w13.openFromPath(demoPath), "阶段10：示例存档（v2，含准备区）打开成功");
+        auto* runtime13 = w13.findChild<RuntimeData*>();
+        auto* view13 = qobject_cast<StageView*>(w13.centralWidget());
+        auto* scene13 = qobject_cast<StageScene*>(view13->scene());
+        CHECK(runtime13->fileData().version == 2, "阶段10：示例存档版本号 v2");
+        CHECK(runtime13->fileData().prepAreas.size() == 2, "阶段10：示例存档含 2 个准备区");
+
+        // 内容包围盒含准备区：左外侧准备区把左缘推到舞台之外、台下准备区推出底缘
+        CHECK(scene13->contentRect().left() < scene13->stageRect().left()
+                  && scene13->contentRect().bottom() > scene13->stageRect().bottom(),
+              "阶段10：contentRect = 舞台 ∪ 准备区包围盒");
+        CHECK(scene13->sceneRect().contains(scene13->contentRect()),
+              "阶段10：sceneRect 外扩余量覆盖全部准备区");
+        // 只读：准备区画在背景层、无图元——准备区中心命中查询返回空
+        CHECK(scene13->topStageItemAt(QPointF(0.0, 1150.0)) == nullptr,
+              "阶段10：准备区不可选中（背景层无图元）");
+
+        // resetView 视野中心 = 内容包围盒中心（含准备区，≠ 舞台中心）
+        CHECK(scene13->contentRect().center() != scene13->stageRect().center(),
+              "阶段10：内容中心 ≠ 舞台中心（准备区参与视野定位）");
+        view13->resetView();
+        const QPoint viewCenter13 = view13->mapFromScene(scene13->contentRect().center());
+        const QPoint vpCenter13 = view13->viewport()->rect().center();
+        CHECK(qAbs(viewCenter13.x() - vpCenter13.x()) <= 2
+                  && qAbs(viewCenter13.y() - vpCenter13.y()) <= 2,
+              "阶段10：resetView 视野中心对准内容包围盒中心");
+
+        // 视口截图存档人工复核（准备区派生色填充 + 名称标签；适配内容包围盒全貌）
+        view13->fitInView(scene13->contentRect().adjusted(-80.0, -80.0, 80.0, 80.0),
+                          Qt::KeepAspectRatio);
+        view13->grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage10-viewport-prepareas.png")));
+    }
+
+    // ---- v1 旧存档兼容实测（真实 MainWindow::openFromPath 打开路径） ----
+    {
+        // 真实构造 version=1、无 prepAreas 节点的 JSON 存档
+        const QString v1Path = tempDir.filePath(QStringLiteral("stage10-v1-legacy.json"));
+        {
+            QFile f(v1Path);
+            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "阶段10：写入 v1 存档");
+            f.write(R"({
+  "version": 1,
+  "stage": { "width": 1200, "depth": 800, "centerOffset": 0 },
+  "objects": [
+    {
+      "id": "actor-001", "type": "actor", "name": "旧角", "color": "#e74c3c",
+      "transform": { "x": 100, "y": 100, "rotation": 0 }, "keyframes": []
+    }
+  ],
+  "timeline": { "duration": 60.0, "labels": [] }
+})");
+        }
+        MainWindow w14;
+        w14.show();
+        QTest::qWaitForWindowExposed(&w14);
+        CHECK(w14.openFromPath(v1Path), "阶段10：v1 旧存档（无 prepAreas 节点）打开成功");
+        auto* runtime14 = w14.findChild<RuntimeData*>();
+        auto* view14 = qobject_cast<StageView*>(w14.centralWidget());
+        auto* scene14 = qobject_cast<StageScene*>(view14->scene());
+        CHECK(runtime14->fileData().prepAreas.isEmpty(), "阶段10：v1 迁移后无准备区");
+        CHECK(scene14->contentRect() == scene14->stageRect(),
+              "阶段10：v1 存档 contentRect 退化为舞台矩形");
+
+        // 保存后回读为 v2 格式（含恒写的 prepAreas 空数组）
+        const QString v2Path = tempDir.filePath(QStringLiteral("stage10-v1-resaved.json"));
+        CHECK(w14.saveToPath(v2Path), "阶段10：v1 存档另存成功");
+        QFile f2(v2Path);
+        CHECK(f2.open(QIODevice::ReadOnly), "阶段10：回读另存文件");
+        const QJsonDocument doc = QJsonDocument::fromJson(f2.readAll());
+        CHECK(doc.object().value(QStringLiteral("version")).toDouble() == 2.0,
+              "阶段10：保存后版本号升为 v2");
+        CHECK(doc.object().contains(QStringLiteral("prepAreas"))
+                  && doc.object().value(QStringLiteral("prepAreas")).isArray(),
+              "阶段10：保存后恒写 prepAreas 数组（空也写 []）");
+        CHECK(!runtime14->isDirty(), "阶段10：另存后干净");
     }
 
     out() << Qt::endl;

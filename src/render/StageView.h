@@ -28,7 +28,7 @@ class StageView : public QGraphicsView
 public:
     explicit StageView(StageScene* scene, EditorCore* editorCore, QWidget* parent = nullptr);
 
-    // 恢复默认比例 1:50，并将视野中心对准舞台中心
+    // 恢复默认比例 1:50，并将视野中心对准内容包围盒（舞台 ∪ 准备区）中心
     void resetView();
 
 protected:

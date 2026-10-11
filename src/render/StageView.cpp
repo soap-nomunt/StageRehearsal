@@ -68,7 +68,7 @@ void StageView::resetView()
 {
     const double scale = defaultScale();
     setTransform(QTransform::fromScale(scale, scale));
-    centerOn(m_scene->stageRect().center());
+    centerOn(m_scene->contentRect().center()); // 视野中心含准备区（阶段10）
 }
 
 void StageView::wheelEvent(QWheelEvent* event)

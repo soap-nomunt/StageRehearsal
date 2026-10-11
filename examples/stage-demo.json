@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "stage": { "width": 1500, "depth": 900, "centerOffset": 100 },
   "objects": [
     {
@@ -28,6 +28,10 @@
       "transform": { "x": 400, "y": 500, "rotation": 0 },
       "keyframes": []
     }
+  ],
+  "prepAreas": [
+    { "id": "prep-001", "name": "准备区1", "x": -1050, "y": 450, "width": 400, "height": 300 },
+    { "id": "prep-002", "name": "准备区2", "x": 0, "y": 1150, "width": 600, "height": 400 }
   ],
   "timeline": {
     "duration": 60.0,

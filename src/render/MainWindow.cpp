@@ -70,14 +70,15 @@ MainWindow::MainWindow(QWidget* parent)
 
 void MainWindow::dumpScreenshotForSelfTest(const QString& path)
 {
-    // 等窗口完成首次布局/绘制后：先按默认 1:50 截一张，再适配舞台截一张
+    // 等窗口完成首次布局/绘制后：先按默认 1:50 截一张，再适配内容包围盒截一张
     QTimer::singleShot(400, this, [this, path]() {
         QString defaultPath = path;
         defaultPath.replace(QStringLiteral(".png"), QStringLiteral("-1to50.png"));
         m_view->viewport()->grab().save(defaultPath);
 
-        const QRectF stage = m_scene->stageRect().adjusted(-80.0, -80.0, 80.0, 80.0);
-        m_view->fitInView(stage, Qt::KeepAspectRatio);
+        // 适配内容包围盒（舞台 ∪ 准备区，阶段10），准备区进入基准图
+        const QRectF content = m_scene->contentRect().adjusted(-80.0, -80.0, 80.0, 80.0);
+        m_view->fitInView(content, Qt::KeepAspectRatio);
         m_view->viewport()->grab().save(path);
 
         // 整窗一张：含时间轴 Dock（阶段5 起），供人工复核轨道/游标/标签渲染

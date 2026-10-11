@@ -52,9 +52,10 @@ void StageScene::rebuild()
     const StageData& stage = file.stage;
     m_stageRect = QRectF(stage.centerOffset - stage.width / 2.0, 0.0, stage.width, stage.depth);
 
-    // 四周留出平移漫游余量，滚动条范围稳定
-    const double margin = qMax(stage.width, stage.depth);
-    setSceneRect(m_stageRect.adjusted(-margin, -margin, margin, margin));
+    // 四周留出平移漫游余量，滚动条范围稳定；包围盒含准备区（阶段10）
+    const QRectF content = contentRect();
+    const double margin = qMax(content.width(), content.height());
+    setSceneRect(content.adjusted(-margin, -margin, margin, margin));
 
     applySelectionHighlight(); // 全量重建后按 id 恢复选中高亮
     applyDisplayTransforms();  // 图元显示当前时刻插值结果（而非静态 transform）
@@ -75,6 +76,16 @@ void StageScene::applyDisplayTransforms()
         item->setPos(value.x, value.y);
         item->setRotation(RenderUtil::toQtRotation(value.rotation));
     }
+}
+
+QRectF StageScene::contentRect() const
+{
+    QRectF content = m_stageRect;
+    for (const PrepAreaData& area : m_runtimeData->fileData().prepAreas) {
+        content = content.united(QRectF(area.x - area.width / 2.0, area.y - area.height / 2.0,
+                                        area.width, area.height));
+    }
+    return content;
 }
 
 StageObjectItem* StageScene::itemById(const QString& id) const
@@ -120,6 +131,15 @@ void StageScene::drawBackground(QPainter* painter, const QRectF& rect)
     painter->fillRect(rect, QColor(QStringLiteral("#242424")));
     painter->fillRect(m_stageRect, m_runtimeData->settings().stageColor());
 
+    // 台下准备区（阶段10）：主视口只读展示（背景层绘制，不可选中/拖动，
+    // 只能经设置页修改）；填充从舞台色派生的深色，压在网格之下
+    const QColor prepFill = m_runtimeData->settings().stageColor().darker(160);
+    for (const PrepAreaData& area : m_runtimeData->fileData().prepAreas) {
+        painter->fillRect(QRectF(area.x - area.width / 2.0, area.y - area.height / 2.0,
+                                 area.width, area.height),
+                          prepFill);
+    }
+
     // 网格：间距读用户设置（设置窗口可调，默认 100cm）；浅灰 cosmetic 笔宽恒为 1px，
     // 不随缩放变化；可见性由设置开关控制（仅影响显示，不影响吸附）
     if (m_runtimeData->settings().gridVisible()) {
@@ -139,6 +159,24 @@ void StageScene::drawBackground(QPainter* painter, const QRectF& rect)
     painter->setPen(stagePen);
     painter->setBrush(Qt::NoBrush);
     painter->drawRect(m_stageRect);
+
+    // 准备区描边 + 名称标签（左上角）压在网格之上；标签字号恒定（抵消视图缩放）
+    const double deviceScale = painter->worldTransform().m11(); // 场景 → 设备缩放
+    QPen prepPen(QColor(QStringLiteral("#4a4a4a")));
+    prepPen.setCosmetic(true);
+    for (const PrepAreaData& area : m_runtimeData->fileData().prepAreas) {
+        const QRectF areaRect(area.x - area.width / 2.0, area.y - area.height / 2.0,
+                              area.width, area.height);
+        painter->setPen(prepPen);
+        painter->drawRect(areaRect);
+        painter->save();
+        painter->translate(areaRect.topLeft());
+        if (deviceScale > 1e-9)
+            painter->scale(1.0 / deviceScale, 1.0 / deviceScale);
+        painter->setPen(QColor(QStringLiteral("#e8e8e8")));
+        painter->drawText(QPointF(6.0, 18.0), area.name);
+        painter->restore();
+    }
 
     // 原点标记：红十字 + 小圆（原点 = 舞台最里边中点 (0,0)）
     QPen originPen(QColor(QStringLiteral("#c0392b")));

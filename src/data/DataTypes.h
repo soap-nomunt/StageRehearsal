@@ -12,7 +12,7 @@
 
 #include <optional>
 
-inline constexpr int kFileDataVersion = 1;
+inline constexpr int kFileDataVersion = 2; // v2（阶段10）：新增 prepAreas 节点；v1 存档宽容迁移（缺省 = 空列表）
 
 enum class ObjectType {
     Actor,  // 演员
@@ -102,6 +102,25 @@ inline bool operator==(const StageData& a, const StageData& b)
 }
 inline bool operator!=(const StageData& a, const StageData& b) { return !(a == b); }
 
+// 台下准备区（阶段10）：纯视觉参照的矩形区块，主视口只读展示，只能经设置窗口调整。
+// x/y = 矩形中心的场景绝对坐标（与舞台 centerOffset 中心定位的习惯一致）；
+// 名称自动命名"准备区N"（不可改名）；颜色从舞台色派生，不单独存储。
+struct PrepAreaData {
+    QString id;              // prep-NNN（业务层生成，全局唯一）
+    QString name;            // 准备区N（自动命名，全局唯一）
+    double x = 0.0;          // cm，矩形中心
+    double y = 0.0;          // cm，矩形中心
+    double width = 400.0;    // cm
+    double height = 300.0;   // cm
+};
+
+inline bool operator==(const PrepAreaData& a, const PrepAreaData& b)
+{
+    return a.id == b.id && a.name == b.name && a.x == b.x && a.y == b.y
+        && a.width == b.width && a.height == b.height;
+}
+inline bool operator!=(const PrepAreaData& a, const PrepAreaData& b) { return !(a == b); }
+
 struct SceneLabel {               // 场次标签（纯视觉标记）
     double t = 0.0;               // 秒
     QString name;
@@ -128,15 +147,17 @@ struct FileData {
     int version = kFileDataVersion;
     StageData stage;
     QList<ObjectData> objects;
+    QList<PrepAreaData> prepAreas; // 台下准备区（v2 新增；v1 存档迁移为空列表）
     TimelineData timeline;
 
-    // 新建文件默认值：舞台 1200×800cm、centerOffset=0、时间轴 60s、空对象、空场次标签
+    // 新建文件默认值：舞台 1200×800cm、centerOffset=0、时间轴 60s、空对象、空准备区、空场次标签
     static FileData createDefault() { return FileData{}; }
 };
 
 inline bool operator==(const FileData& a, const FileData& b)
 {
     return a.version == b.version && a.stage == b.stage && a.objects == b.objects
+        && a.prepAreas == b.prepAreas // dirty 内容比较依赖本字段，漏加 = dirty 跟踪静默失效
         && a.timeline == b.timeline;
 }
 inline bool operator!=(const FileData& a, const FileData& b) { return !(a == b); }
