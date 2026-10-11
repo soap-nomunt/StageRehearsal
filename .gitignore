@@ -9,6 +9,9 @@ dist/
 # 项目内部设计文档（仅本地保留，不上传）
 doc/
 
+# AI 助手项目指南（含本机路径信息，仅本地保留）
+AGENTS.md
+
 # CMake 生成物（防止在源码目录内直接 configure 时混入）
 CMakeCache.txt
 CMakeFiles/
