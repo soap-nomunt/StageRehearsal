@@ -132,12 +132,14 @@ void StageScene::drawBackground(QPainter* painter, const QRectF& rect)
     painter->fillRect(m_stageRect, m_runtimeData->settings().stageColor());
 
     // 台下准备区（阶段10）：主视口只读展示（背景层绘制，不可选中/拖动，
-    // 只能经设置页修改）；填充从舞台色派生的深色，压在网格之下
-    const QColor prepFill = m_runtimeData->settings().stageColor().darker(160);
+    // 只能经设置页修改）；填充逐区取色（阶段11）：独立色优先，invalid 派生态
+    // 回退舞台色深色变体（与 PrepAreaCanvas 回退逻辑同式），压在网格之下
     for (const PrepAreaData& area : m_runtimeData->fileData().prepAreas) {
+        const QColor fill = area.color.isValid() ? area.color
+            : m_runtimeData->settings().stageColor().darker(160);
         painter->fillRect(QRectF(area.x - area.width / 2.0, area.y - area.height / 2.0,
                                  area.width, area.height),
-                          prepFill);
+                          fill);
     }
 
     // 网格：间距读用户设置（设置窗口可调，默认 100cm）；浅灰 cosmetic 笔宽恒为 1px，

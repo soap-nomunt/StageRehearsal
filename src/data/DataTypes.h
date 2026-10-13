@@ -12,7 +12,7 @@
 
 #include <optional>
 
-inline constexpr int kFileDataVersion = 2; // v2（阶段10）：新增 prepAreas 节点；v1 存档宽容迁移（缺省 = 空列表）
+inline constexpr int kFileDataVersion = 3; // v3（阶段11）：PrepAreaData 新增 color 字段；v1/v2 存档宽容迁移（准备区颜色缺省 = invalid 派生态）
 
 enum class ObjectType {
     Actor,  // 演员
@@ -104,7 +104,10 @@ inline bool operator!=(const StageData& a, const StageData& b) { return !(a == b
 
 // 台下准备区（阶段10）：纯视觉参照的矩形区块，主视口只读展示，只能经设置窗口调整。
 // x/y = 矩形中心的场景绝对坐标（与舞台 centerOffset 中心定位的习惯一致）；
-// 名称自动命名"准备区N"（不可改名）；颜色从舞台色派生，不单独存储。
+// 名称自动命名"准备区N"（不可改名）。
+// color（阶段11，v3 新增）：每区独立填充色；invalid = 派生态（跟随舞台色，
+// 渲染时回退 stageColor().darker(160)）。数据层不知道 AppSettings（零交叉约定），
+// v1/v2 迁移与新建均为派生态，不烘入具体色值。
 struct PrepAreaData {
     QString id;              // prep-NNN（业务层生成，全局唯一）
     QString name;            // 准备区N（自动命名，全局唯一）
@@ -112,12 +115,14 @@ struct PrepAreaData {
     double y = 0.0;          // cm，矩形中心
     double width = 400.0;    // cm
     double height = 300.0;   // cm
+    QColor color;            // invalid = 派生态（跟随舞台色）；JSON 中存 "#rrggbb" 或空串
 };
 
 inline bool operator==(const PrepAreaData& a, const PrepAreaData& b)
 {
     return a.id == b.id && a.name == b.name && a.x == b.x && a.y == b.y
-        && a.width == b.width && a.height == b.height;
+        && a.width == b.width && a.height == b.height
+        && a.color == b.color; // dirty 判定依赖：漏加 = 颜色改动不弄脏文件
 }
 inline bool operator!=(const PrepAreaData& a, const PrepAreaData& b) { return !(a == b); }
 

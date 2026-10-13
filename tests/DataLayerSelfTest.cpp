@@ -23,6 +23,9 @@
 // 空列表 / version 受理区间 [1,2] / 非法字段拒载）；EditorCore::setPrepAreas /
 // addPrepArea / removePrepArea 直改直提交（校验拒绝 / 自动命名递增 / 不入
 // 撤销栈 / undo 不影响准备区）。
+// 阶段11：存档 v3——PrepAreaData 新增 color（显式色往返 / invalid = 派生态 /
+// v2 存档 prepAreas 无 color 键宽容迁移为派生态 / 受理区间 [1,3]，version=4 才拒）；
+// setPrepAreas 颜色变更生效（operator== 含 color，dirty 判定不失效）。
 #include "business/Commands.h"
 #include "business/EditorCore.h"
 #include "business/KeyframeCommands.h"
@@ -80,7 +83,8 @@ bool writeTextFile(const QString& path, const QByteArray& content)
 }
 
 // 构造一份带自定义数值的数据：舞台 / 演员（3 关键帧）/ 屏风（size + 2 关键帧）/
-// 2 个准备区（阶段10）/ 2 个场次标签。
+// 2 个准备区（阶段10；阶段11 起 prep1 显式色、prep2 派生态，覆盖两条颜色路径）/
+// 2 个场次标签。
 // 数值均取二进制可精确表示的“整齐”值，保证 double 严格相等。
 FileData makeSampleData()
 {
@@ -121,6 +125,7 @@ FileData makeSampleData()
     prep1.y = 450.0;
     prep1.width = 400.0;
     prep1.height = 300.0;
+    prep1.color = QColor(QStringLiteral("#d35400")); // 阶段11：显式独立色
     data.prepAreas.append(prep1);
 
     PrepAreaData prep2;
@@ -130,6 +135,7 @@ FileData makeSampleData()
     prep2.y = 1150.0;
     prep2.width = 600.0;
     prep2.height = 400.0;
+    // color 保持 invalid（阶段11：派生态路径）
     data.prepAreas.append(prep2);
 
     data.timeline.duration = 90.5;
@@ -1431,7 +1437,11 @@ void testRoundTrip(QTemporaryDir& dir)
     CHECK(loaded.objects.size() == 2, "对象数量一致（演员+屏风）");
     CHECK(loaded.objects == original.objects, "ObjectData（含关键帧、屏风 size）逐字段一致");
     CHECK(loaded.prepAreas.size() == 2, "准备区数量一致");
-    CHECK(loaded.prepAreas == original.prepAreas, "PrepAreaData（id/name/x/y/宽高）逐字段一致");
+    CHECK(loaded.prepAreas == original.prepAreas, "PrepAreaData（id/name/x/y/宽高/color）逐字段一致");
+    CHECK(loaded.prepAreas.first().color == QColor(QStringLiteral("#d35400")),
+          "准备区 color 往返一致（显式色 → \"#rrggbb\"）");
+    CHECK(!loaded.prepAreas.at(1).color.isValid(),
+          "准备区 color 往返一致（派生态 → 空串 → invalid）");
     CHECK(loaded.timeline == original.timeline, "TimelineData（含场次标签）逐字段一致");
     CHECK(loaded == original, "FileData 整体一致");
 }
@@ -1452,18 +1462,19 @@ void testCorruptedFile(QTemporaryDir& dir)
     CHECK(!arrayResult.ok() && arrayResult.error == LoadError::Parse, "根节点为数组返回 LoadError::Parse");
 }
 
-// 阶段10 改写：版本受理区间 [1, 2]——v3（未来版本）拒载；v1 存档（无 prepAreas
-// 节点）宽容迁移为 prepAreas 空列表（仿 testParentGroupJson 的剥字段兼容模式）
+// 阶段11 改写：版本受理区间 [1, 3]——v4（未来版本）拒载；v1 存档（无 prepAreas
+// 节点）宽容迁移为空列表；v2 存档（prepAreas 元素无 color 键）宽容迁移为派生态
+// （仿 testParentGroupJson 的剥字段兼容模式）
 void testVersionMismatch(QTemporaryDir& dir)
 {
     QJsonObject root = JsonStore::toJson(FileData::createDefault());
 
-    root[QStringLiteral("version")] = 3;
-    const QString futurePath = dir.filePath(QStringLiteral("v3.json"));
+    root[QStringLiteral("version")] = 4;
+    const QString futurePath = dir.filePath(QStringLiteral("v4.json"));
     writeTextFile(futurePath, QJsonDocument(root).toJson());
     const LoadResult futureResult = JsonStore::load(futurePath);
     CHECK(!futureResult.ok() && futureResult.error == LoadError::UnsupportedVersion,
-          "version=3（高于当前）返回 LoadError::UnsupportedVersion");
+          "version=4（高于当前）返回 LoadError::UnsupportedVersion");
 
     root[QStringLiteral("version")] = 0;
     const QString lowPath = dir.filePath(QStringLiteral("v0.json"));
@@ -1495,7 +1506,71 @@ void testVersionMismatch(QTemporaryDir& dir)
               "v1 迁移：对象数据不受影响");
     }
 
-    // v2 存档 prepAreas 字段非法 → 严格校验报错而非崩溃
+    // v2 存档迁移：prepAreas 元素无 color 键（剥字段模式），加载成功且颜色均为
+    // invalid（派生态，视觉零变化）
+    QJsonObject v2 = JsonStore::toJson(makeSampleData());
+    v2[QStringLiteral("version")] = 2;
+    QJsonArray v2Areas = v2.value(QStringLiteral("prepAreas")).toArray();
+    for (int i = 0; i < v2Areas.size(); ++i) {
+        QJsonObject area = v2Areas.at(i).toObject();
+        area.remove(QStringLiteral("color"));
+        v2Areas[i] = area;
+    }
+    v2[QStringLiteral("prepAreas")] = v2Areas;
+    const QString v2Path = dir.filePath(QStringLiteral("v2-legacy.json"));
+    writeTextFile(v2Path, QJsonDocument(v2).toJson());
+    const LoadResult v2Result = JsonStore::load(v2Path);
+    CHECK(v2Result.ok(), "v2 存档（prepAreas 无 color 键）加载成功：" + v2Result.message);
+    if (v2Result.ok()) {
+        CHECK(v2Result.data.version == kFileDataVersion, "v2 迁移后版本号升到当前版本");
+        CHECK(v2Result.data.prepAreas.size() == 2, "v2 迁移：准备区数量不变");
+        bool allDerived = true;
+        for (const PrepAreaData& area : v2Result.data.prepAreas)
+            allDerived = allDerived && !area.color.isValid();
+        CHECK(allDerived, "v2 迁移：准备区 color 缺省为 invalid（派生态）");
+        const QList<PrepAreaData> sampleAreas = makeSampleData().prepAreas;
+        CHECK(v2Result.data.prepAreas.first().x == sampleAreas.first().x
+                  && v2Result.data.prepAreas.first().width == sampleAreas.first().width,
+              "v2 迁移：准备区其余字段不受影响");
+    }
+
+    // 显式空串 color 同样宽容为 invalid（恒写空串的派生态存档读回路径）
+    QJsonObject emptyColor = JsonStore::toJson(makeSampleData());
+    QJsonArray emptyAreas = emptyColor.value(QStringLiteral("prepAreas")).toArray();
+    for (int i = 0; i < emptyAreas.size(); ++i) {
+        QJsonObject area = emptyAreas.at(i).toObject();
+        area[QStringLiteral("color")] = QString();
+        emptyAreas[i] = area;
+    }
+    emptyColor[QStringLiteral("prepAreas")] = emptyAreas;
+    const QString emptyPath = dir.filePath(QStringLiteral("emptycolor.json"));
+    writeTextFile(emptyPath, QJsonDocument(emptyColor).toJson());
+    const LoadResult emptyResult = JsonStore::load(emptyPath);
+    CHECK(emptyResult.ok(), "显式空串 color 的存档加载成功：" + emptyResult.message);
+    if (emptyResult.ok()) {
+        bool allDerived = true;
+        for (const PrepAreaData& area : emptyResult.data.prepAreas)
+            allDerived = allDerived && !area.color.isValid();
+        CHECK(allDerived, "空串 color 解析为 invalid（派生态）");
+    }
+
+    // 非法颜色字符串宽松得 invalid，不报错（沿 ObjectData 颜色先例）
+    QJsonObject badColor = JsonStore::toJson(makeSampleData());
+    QJsonArray badColorAreas = badColor.value(QStringLiteral("prepAreas")).toArray();
+    {
+        QJsonObject area = badColorAreas.first().toObject();
+        area[QStringLiteral("color")] = QStringLiteral("not-a-color");
+        badColorAreas[0] = area;
+    }
+    badColor[QStringLiteral("prepAreas")] = badColorAreas;
+    const QString badColorPath = dir.filePath(QStringLiteral("badcolor.json"));
+    writeTextFile(badColorPath, QJsonDocument(badColor).toJson());
+    const LoadResult badColorResult = JsonStore::load(badColorPath);
+    CHECK(badColorResult.ok()
+              && !badColorResult.data.prepAreas.first().color.isValid(),
+          "非法颜色字符串宽松得 invalid（不报错）");
+
+    // prepAreas 字段非法 → 严格校验报错而非崩溃
     QJsonObject badPrep = JsonStore::toJson(FileData::createDefault());
     QJsonArray badAreas;
     QJsonObject badArea;
@@ -1776,6 +1851,7 @@ void testPrepAreas()
         CHECK(area.name == QStringLiteral("准备区1"), "addPrepArea 自动命名（准备区1）");
         CHECK(area.width == 400.0 && area.height == 300.0, "addPrepArea 默认 400×300");
         CHECK(area.x == -1050.0 && area.y == 450.0, "addPrepArea 中心落在指定坐标");
+        CHECK(!area.color.isValid(), "addPrepArea 默认 color 为 invalid（派生态，阶段11）");
         CHECK(core.findPrepArea(id1) == &runtime.fileData().prepAreas.first(),
               "findPrepArea 命中");
     }
@@ -1825,6 +1901,28 @@ void testPrepAreas()
     CHECK(emissions == before + 1, "setPrepAreas 发出一次 fileDataChanged");
     CHECK(!core.canUndo(), "setPrepAreas 不产生撤销条目（canUndo 不变）");
     CHECK(runtime.isDirty(), "准备区修改弄脏文件（dirty 置位）");
+
+    // ---- 颜色变更（阶段11）：仅改 color 也构成真实变更（operator== 含 color） ----
+    QList<PrepAreaData> colored = runtime.fileData().prepAreas;
+    colored[0].color = QColor(QStringLiteral("#123abc"));
+    const int beforeColor = emissions;
+    CHECK(core.setPrepAreas(colored), "setPrepAreas 仅改颜色也提交（dirty 判定含 color）");
+    CHECK(runtime.fileData().prepAreas.first().color == QColor(QStringLiteral("#123abc")),
+          "setPrepAreas 颜色变更生效");
+    CHECK(emissions == beforeColor + 1, "颜色变更发出一次 fileDataChanged");
+    colored[0].color = QColor(); // 改回派生态
+    CHECK(core.setPrepAreas(colored)
+              && !runtime.fileData().prepAreas.first().color.isValid(),
+          "setPrepAreas 颜色改回 invalid（恢复派生态路径存在）");
+
+    // ---- 往返一致（阶段11）：显式色与派生态经 JSON 序列化/解析逐字段还原 ----
+    QList<PrepAreaData> roundTrip = runtime.fileData().prepAreas;
+    roundTrip[0].color = QColor(QStringLiteral("#d35400")); // prep-001 显式色
+    roundTrip[1].color = QColor();                          // prep-002 派生态
+    CHECK(core.setPrepAreas(roundTrip), "setPrepAreas 写入显式/派生两态颜色");
+    const LoadResult rr = JsonStore::fromJson(JsonStore::toJson(runtime.fileData()));
+    CHECK(rr.ok() && rr.data.prepAreas == runtime.fileData().prepAreas,
+          "准备区颜色 JSON 往返一致（显式色 + 派生态）");
 
     // ---- undo 不影响准备区：对象命令入栈 → 改准备区 → undo 只撤对象 ----
     CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "准备区测试：创建演员入撤销栈");

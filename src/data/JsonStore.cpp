@@ -58,6 +58,8 @@ QJsonObject prepAreaToJson(const PrepAreaData& p)
     obj[QStringLiteral("y")] = p.y;
     obj[QStringLiteral("width")] = p.width;
     obj[QStringLiteral("height")] = p.height;
+    // v3 起恒写（沿 ObjectData 颜色先例）：有效 → "#rrggbb"，invalid（派生态）→ 空串
+    obj[QStringLiteral("color")] = p.color.isValid() ? p.color.name(QColor::HexRgb) : QString();
     return obj;
 }
 
@@ -228,6 +230,11 @@ bool parsePrepArea(const QJsonValue& value, PrepAreaData& out, QString& error)
         error = QStringLiteral("准备区 %1 的宽高必须 > 0").arg(out.id);
         return false;
     }
+    // color（v3 新增）：缺失/空串宽容为 invalid（派生态，v2 迁移路径）；
+    // 存在且为字符串 → QColor 解析，非法字符串宽松得 invalid，不报错
+    const QJsonValue colorValue = obj.value(QStringLiteral("color"));
+    if (colorValue.isString() && !colorValue.toString().isEmpty())
+        out.color = QColor(colorValue.toString());
     return true;
 }
 
@@ -272,8 +279,8 @@ QJsonObject JsonStore::toJson(const FileData& data)
 
 LoadResult JsonStore::fromJson(const QJsonObject& root)
 {
-    // 版本受理区间 [1, currentVersion]：低版本存档宽容迁移（v1 无 prepAreas 节点，
-    // 迁移为空列表），高于当前版本（未来存档）拒载
+    // 版本受理区间 [1, currentVersion]：低版本存档宽容迁移（v1 无 prepAreas 节点 →
+    // 空列表；v2 prepAreas 无 color 键 → 派生态 invalid），高于当前版本（未来存档）拒载
     const QJsonValue versionValue = root.value(QStringLiteral("version"));
     if (!versionValue.isDouble() || versionValue.toDouble() < 1.0
         || versionValue.toDouble() > static_cast<double>(currentVersion)) {

@@ -84,6 +84,7 @@ void PrepAreaCanvas::updateTransform()
     }
     if (bbox.isEmpty()) // 防御：舞台宽高恒 > 0，正常不会走到
         bbox = QRectF(-1.0, -1.0, 2.0, 2.0);
+    m_contentBBox = bbox;
 
     const double availW = qMax(1.0, width() - 2.0 * kMarginPx);
     const double availH = qMax(1.0, height() - 2.0 * kMarginPx);
@@ -91,6 +92,25 @@ void PrepAreaCanvas::updateTransform()
     // 包围盒在画布内居中
     m_origin = QPointF((width() - bbox.width() * m_scale) / 2.0 - bbox.left() * m_scale,
                        (height() - bbox.height() * m_scale) / 2.0 - bbox.top() * m_scale);
+    clampPanOffset(); // 适配重算后旧平移偏移可能越界：钳回内容可见（不重置偏移本身）
+}
+
+void PrepAreaCanvas::clampPanOffset()
+{
+    // 主视口平移限界靠滚动条范围（sceneRect 外扩余量）；画布无滚动条，等效钳制：
+    // 内容包围盒始终与控件保持相交（留一抹内容可见，平移不会把内容推出视野）
+    if (m_contentBBox.isEmpty())
+        return;
+    const QRectF px = canvasFromScene(m_contentBBox);
+    const QRectF view = QRectF(rect());
+    if (px.right() <= view.left())
+        m_panOffset.rx() += view.left() - px.right() + 1.0;
+    else if (px.left() >= view.right())
+        m_panOffset.rx() += view.right() - px.left() - 1.0;
+    if (px.bottom() <= view.top())
+        m_panOffset.ry() += view.top() - px.bottom() + 1.0;
+    else if (px.top() >= view.bottom())
+        m_panOffset.ry() += view.bottom() - px.top() - 1.0;
 }
 
 QRectF PrepAreaCanvas::blockSceneRect(const QString& id) const
@@ -124,14 +144,14 @@ QString PrepAreaCanvas::blockAt(const QPoint& canvasPos) const
 
 QPointF PrepAreaCanvas::sceneFromCanvas(const QPointF& canvasPos) const
 {
-    return QPointF((canvasPos.x() - m_origin.x()) / m_scale,
-                   (canvasPos.y() - m_origin.y()) / m_scale);
+    return QPointF((canvasPos.x() - m_origin.x() - m_panOffset.x()) / m_scale,
+                   (canvasPos.y() - m_origin.y() - m_panOffset.y()) / m_scale);
 }
 
 QRectF PrepAreaCanvas::canvasFromScene(const QRectF& sceneRect) const
 {
-    return QRectF(m_origin.x() + sceneRect.left() * m_scale,
-                  m_origin.y() + sceneRect.top() * m_scale,
+    return QRectF(m_origin.x() + m_panOffset.x() + sceneRect.left() * m_scale,
+                  m_origin.y() + m_panOffset.y() + sceneRect.top() * m_scale,
                   sceneRect.width() * m_scale, sceneRect.height() * m_scale);
 }
 
@@ -150,13 +170,15 @@ void PrepAreaCanvas::paintEvent(QPaintEvent* event)
 
     const QColor stageColor =
         m_settings ? m_settings->stageColor() : AppSettings::defaultStageColor();
-    const QColor prepColor = stageColor.darker(160); // 准备区颜色固定从舞台色派生
 
-    // 舞台在底层，准备区按列表顺序叠画
+    // 舞台在底层，准备区按列表顺序叠画；准备区逐区取色（阶段11）：独立色优先，
+    // invalid 派生态回退舞台色深色变体（与 StageScene::drawBackground 回退逻辑同式）
     drawBlock(&painter, stageBlockId(), stageColor, QStringLiteral("舞台"),
               m_stageRect.width(), m_stageRect.height());
     for (const PrepAreaData& area : m_prepAreas)
-        drawBlock(&painter, area.id, prepColor, area.name, area.width, area.height);
+        drawBlock(&painter, area.id,
+                  area.color.isValid() ? area.color : stageColor.darker(160),
+                  area.name, area.width, area.height);
 }
 
 void PrepAreaCanvas::drawBlock(QPainter* painter, const QString& id, const QColor& fill,
@@ -204,6 +226,25 @@ void PrepAreaCanvas::resizeEvent(QResizeEvent* event)
 
 void PrepAreaCanvas::mousePressEvent(QMouseEvent* event)
 {
+    // 手势嵌套防护（同主视口）：手势进行中吞掉其余按下
+    if (m_panning || !m_dragId.isEmpty()) {
+        event->accept();
+        return;
+    }
+
+    // 右键平移（同主视口 StageView）：任意位置（空白/方块上一视同仁）按下即进入
+    // 平移手势、握拳光标；越过阈值才移动（mouseMoveEvent），纯点击不弹菜单与否由
+    // contextMenuEvent 按 m_panMoved 判定——平移不改变选中、不动数据
+    if (event->button() == Qt::RightButton) {
+        m_panning = true;
+        m_panMoved = false;
+        m_panPressPos = event->pos();
+        m_lastPanPos = m_panPressPos;
+        setCursor(Qt::ClosedHandCursor);
+        event->accept();
+        return;
+    }
+
     if (event->button() == Qt::LeftButton) {
         const QString hit = blockAt(event->pos());
         if (!hit.isEmpty()) {
@@ -230,6 +271,23 @@ void PrepAreaCanvas::mousePressEvent(QMouseEvent* event)
 
 void PrepAreaCanvas::mouseMoveEvent(QMouseEvent* event)
 {
+    if (m_panning) {
+        const QPoint pos = event->pos();
+        if (!m_panMoved
+            && (pos - m_panPressPos).manhattanLength()
+                >= QApplication::startDragDistance()) {
+            m_panMoved = true;
+        }
+        if (m_panMoved) {
+            // 内容随手（主视口滚动条 value−delta 的等效方向：拖右内容右移）
+            m_panOffset += QPointF(pos - m_lastPanPos);
+            clampPanOffset();
+            update();
+        }
+        m_lastPanPos = pos;
+        event->accept();
+        return;
+    }
     if (!m_dragId.isEmpty()) {
         if (!m_dragging
             && (event->pos() - m_pressPos).manhattanLength()
@@ -249,6 +307,12 @@ void PrepAreaCanvas::mouseMoveEvent(QMouseEvent* event)
 
 void PrepAreaCanvas::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (event->button() == Qt::RightButton && m_panning) {
+        m_panning = false;
+        unsetCursor(); // 平移结束恢复箭头（画布无悬停指针逻辑）
+        event->accept(); // m_panMoved 保留给 contextMenuEvent 判定是否弹菜单
+        return;
+    }
     if (event->button() == Qt::LeftButton && !m_dragId.isEmpty()) {
         const QString id = m_dragId;
         const bool moved = m_dragging;
@@ -266,6 +330,13 @@ void PrepAreaCanvas::mouseReleaseEvent(QMouseEvent* event)
 
 void PrepAreaCanvas::contextMenuEvent(QContextMenuEvent* event)
 {
+    if (m_panMoved) {
+        // 右键平移后松开触发的这次：吞掉，不弹菜单（同主视口）
+        m_panMoved = false;
+        event->accept();
+        return;
+    }
+
     const QString hit = blockAt(event->pos());
     if (hit == stageBlockId())
         return; // 右键舞台：无菜单（舞台唯一，不可新建/删除）

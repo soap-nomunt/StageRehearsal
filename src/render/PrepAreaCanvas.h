@@ -6,9 +6,15 @@
 // EditorCore（提交链路：信号 → EditorCore add/remove/setPrepAreas →
 // commitFileData → fileDataChanged → 回喂画布）。
 // 全部方块包围盒自适应缩放留边；舞台方块固定为参照物不可拖（y 由坐标系定义
-// 锁定，位置由"中心点偏移"数值行调整）；准备区方块可拖——拖动中实时移动本地
-// 预览（50cm 网格吸附），松开才发一次移动请求。
-// 右键空白 = 新建准备区（右键处吸附坐标）；右键准备区 = 删除；右键舞台 = 无菜单。
+// 锁定，位置由"中心点偏移"数值行调整）；准备区方块左键可拖——拖动中实时移动
+// 本地预览（50cm 网格吸附），松开才发一次移动请求。
+// 右键平移（同主视口 StageView 语义）：任意位置（空白/方块上一视同仁）右键按住
+// 即进入平移手势（握拳光标），越过拖拽阈值后内容随手移动——像素偏移叠加在
+// 自适应适配变换之上（updateTransform 重算不吞偏移），无滚动条故钳制限界：
+// 内容包围盒始终与控件保持相交，不会把内容推出视野。平移过则吞掉随之而来的
+// contextMenuEvent（Windows 右键松开即发 WM_CONTEXTMENU），不弹菜单；
+// 纯右键点击（未越阈值松开）照旧：空白 = 新建准备区（右键处吸附坐标）、
+// 准备区 = 删除、舞台 = 无菜单。
 // 选中态为画布局部状态：恰好一个方块被选中（默认舞台），随 setContent 校验
 // 存在性（准备区被删后回落选中舞台并发 selectionChanged）。
 
@@ -56,6 +62,7 @@ protected:
 
 private:
     void updateTransform(); // 内容包围盒（舞台 ∪ 准备区）→ 画布像素的自适应缩放变换
+    void clampPanOffset();  // 平移限界：内容包围盒始终与控件保持相交（画布无滚动条）
     void drawBlock(QPainter* painter, const QString& id, const QColor& fill,
                    const QString& name, double widthCm, double heightCm) const;
     QRectF blockSceneRect(const QString& id) const;  // 场景矩形（cm；拖动中取预览位置）
@@ -70,10 +77,19 @@ private:
     QList<PrepAreaData> m_prepAreas;
     QString m_selectedId; // 默认 stageBlockId()
 
-    double m_scale = 1.0;  // cm → 画布像素
-    QPointF m_origin;      // 场景原点在画布上的像素位置
+    QRectF m_contentBBox;   // 内容包围盒（场景坐标，updateTransform 缓存，限界用）
+    double m_scale = 1.0;   // cm → 画布像素
+    QPointF m_origin;       // 场景原点在画布上的像素位置（自适应适配结果）
+    QPointF m_panOffset;    // 右键平移像素偏移（叠加在适配之上；setContent/resize 不重置）
 
-    // 拖拽预览：只动本地预览不写数据，松开才发一次 prepAreaMoveRequested
+    // 右键平移（同主视口 StageView）：按下即进入手势，越阈值才移动；
+    // m_panMoved 保留给 contextMenuEvent 判定是否弹菜单（平移过 = 吞掉不弹）
+    bool m_panning = false;
+    bool m_panMoved = false;
+    QPoint m_panPressPos;
+    QPoint m_lastPanPos;
+
+    // 左键拖拽预览：只动本地预览不写数据，松开才发一次 prepAreaMoveRequested
     QString m_dragId;          // 非空 = 左键按在准备区上（待判定/拖动中）
     bool m_dragging = false;   // 已越过拖动阈值
     QPoint m_pressPos;         // 按下点（画布像素）

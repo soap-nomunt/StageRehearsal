@@ -24,8 +24,13 @@
 // 阶段10：舞台分类页顶部新增"舞台与准备区"方块编辑器（PrepAreaCanvas，
 // Windows 显示设置式布置图）——准备区布局是文件数据（FileData.prepAreas），
 // 经 EditorCore add/remove/setPrepAreas 直改直提交、不入撤销栈（同 setStage
-// 先例）；选中联动：选中舞台 → 舞台属性行可用（准备区行禁用），选中准备区 →
-// 准备区宽高行可用（舞台属性行禁用）。
+// 先例）。
+// 阶段11：舞台页重构为左右双侧布局——左侧 PrepAreaCanvas 画布（吃剩余空间），
+// 右侧固定宽 Inspector（选中对象标题 + QStackedWidget 双页：舞台属性页 /
+// 准备区属性页）。点击画布方块切页：舞台 → 宽/深/中心偏移/颜色；准备区 →
+// X/Y/宽/高（editingFinished 提交，与画布拖拽双向同步）/颜色（色块按钮弹
+// QColorDialog，invalid = 跟随舞台色派生态）。阶段10 的两组属性行启用/禁用
+// 联动随之废止。
 
 #include <QColor>
 #include <QDialog>
@@ -83,11 +88,12 @@ private:
     void applySearchFilter();   // 搜索过滤 / 清空恢复
     void updateColorSwatch();   // 色块按钮底色与色值文本随当前设置刷新
 
-    // ---- 舞台与准备区方块编辑器（阶段10）----
+    // ---- 舞台与准备区方块编辑器（阶段10）/ 右侧 Inspector 双页（阶段11）----
     QRectF stageRect() const;   // 由当前 StageData 推导的舞台矩形（喂画布用）
     void feedPrepCanvas();      // fileDataChanged / 颜色改动后回喂画布内容
-    void updatePrepRowStates(); // 选中方块联动：舞台属性行 ⇄ 准备区宽高行启用态与回显
-    void commitPrepSpins();     // 准备区宽高 editingFinished：组装列表走 setPrepAreas
+    void updatePrepInspector(); // 选中方块联动：Inspector 标题 + 切页 + 该页数值回显
+    void updatePrepColorSwatch(); // 准备区色块按钮底色与色值文本随选中区刷新
+    void commitPrepSpins();     // 准备区 X/Y/宽/高 editingFinished：组装列表走 setPrepAreas
 
     RuntimeData* m_runtimeData = nullptr; // 不拥有
     EditorCore* m_editorCore = nullptr;   // 不拥有
@@ -104,8 +110,15 @@ private:
     QDoubleSpinBox* m_offsetSpin = nullptr; // stageOffsetSpin
     QPushButton* m_colorButton = nullptr;   // stageColorButton
     PrepAreaCanvas* m_prepCanvas = nullptr;     // prepAreaCanvas（阶段10 方块编辑器）
+    QLabel* m_prepInspectorTitle = nullptr;         // prepInspectorTitle（选中对象名，阶段11）
+    QStackedWidget* m_stageInspectorStack = nullptr; // stageInspectorStack（舞台页/准备区页）
+    QWidget* m_stagePropsPage = nullptr;        // stagePropsPage（舞台属性页）
+    QWidget* m_prepPropsPage = nullptr;         // prepPropsPage（准备区属性页）
+    QDoubleSpinBox* m_prepXSpin = nullptr;      // prepXSpin（阶段11）
+    QDoubleSpinBox* m_prepYSpin = nullptr;      // prepYSpin（阶段11）
     QDoubleSpinBox* m_prepWidthSpin = nullptr;  // prepWidthSpin
     QDoubleSpinBox* m_prepHeightSpin = nullptr; // prepHeightSpin
+    QPushButton* m_prepColorButton = nullptr;   // prepColorButton（阶段11）
     QCheckBox* m_gridVisibleCheck = nullptr;    // gridVisibleCheck
     QCheckBox* m_gridSnapCheck = nullptr;       // gridSnapCheck
     QCheckBox* m_keyframePromptCheck = nullptr; // keyframePromptCheck

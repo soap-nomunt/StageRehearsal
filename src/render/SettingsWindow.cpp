@@ -27,10 +27,10 @@ SettingsWindow::SettingsWindow(RuntimeData* runtimeData, EditorCore* editorCore,
     , m_editorCore(editorCore)
 {
     setWindowTitle(QStringLiteral("设置"));
-    // 舞台页内容（画布行 280min + 6 个数值/颜色行）实测需要约 860px 高度才能
-    // 完整显示；最小尺寸保持较小值，窗口过小时画布行被压缩、用户可调大
-    resize(900, 860);
-    setMinimumSize(760, 560);
+    // 阶段11 双侧布局：左画布（弹性）+ 右 Inspector（固定 340px）；实测 1120×720
+    // 下画布完整可见且 Inspector 行不裁切（截图复核，阶段10 教训：过窄会把画布压扁）
+    resize(1120, 720);
+    setMinimumSize(960, 620);
 
     auto* rootLayout = new QVBoxLayout(this);
     rootLayout->setContentsMargins(12, 12, 12, 12);
@@ -81,32 +81,86 @@ SettingsWindow::SettingsWindow(RuntimeData* runtimeData, EditorCore* editorCore,
     AppSettings& settings = m_runtimeData->settings();
 
     // ---- 舞台分类（宽/深/中心点偏移 = 文件数据；舞台颜色 = 软件自身设置） ----
-    // 顶部："舞台与准备区"方块编辑器（阶段10，Windows 显示设置式布置图）——
-    // 哑控件：信号 → EditorCore add/remove/setPrepAreas 直改直提交（同 setStage
-    // 先例，不入撤销栈）；fileDataChanged 时回喂内容（refreshStageControls）
-    m_prepCanvas = new PrepAreaCanvas(&m_runtimeData->settings(), this);
-    QWidget* canvasRow = createRow(stageLayout, QStringLiteral("舞台与准备区"),
-                                   QStringLiteral("拖拽调整相对位置；右键空白新建准备区。"),
-                                   m_prepCanvas);
-    // 画布行吃掉分类页多余纵向空间（其余行保持固有高度）
-    canvasRow->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
-    stageLayout->setStretchFactor(canvasRow, 1);
+    // 阶段11 双侧布局：左列"舞台与准备区"方块编辑器（PrepAreaCanvas，弹性吃剩余
+    // 空间），右列固定宽 Inspector（选中对象标题 + 属性页栈）。方块编辑器是哑控件：
+    // 信号 → EditorCore add/remove/setPrepAreas 直改直提交（同 setStage 先例，
+    // 不入撤销栈）；fileDataChanged 时回喂内容（refreshStageControls）
+    auto* splitContainer = new QWidget(this);
+    auto* splitLayout = new QHBoxLayout(splitContainer);
+    splitLayout->setContentsMargins(0, 0, 0, 0);
+    splitLayout->setSpacing(12);
+    stageLayout->insertWidget(stageLayout->count() - 1, splitContainer, 1); // stretch 前，吃整页空间
 
+    auto* leftColumn = new QVBoxLayout;
+    leftColumn->setContentsMargins(0, 0, 0, 0);
+    leftColumn->setSpacing(4);
+    leftColumn->addStretch(); // 同 createPage：createRow 行一律插到 stretch 前
+    splitLayout->addLayout(leftColumn, 1);
+
+    m_prepCanvas = new PrepAreaCanvas(&m_runtimeData->settings(), this);
+    QWidget* canvasRow = createRow(leftColumn, QStringLiteral("舞台与准备区"),
+                                   QStringLiteral("点击方块在右侧编辑属性；左键拖拽调整位置，"
+                                                  "右键拖拽平移画布；右键空白新建准备区。"),
+                                   m_prepCanvas);
+    // 画布行吃掉左列多余纵向空间（保持固有高度则画布太小不便拖拽）
+    canvasRow->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+    leftColumn->setStretchFactor(canvasRow, 1);
+
+    // 右列 Inspector：选中对象标题（加粗）+ 属性页栈（舞台页 / 准备区页）
+    auto* inspectorContainer = new QWidget(splitContainer);
+    inspectorContainer->setFixedWidth(340);
+    auto* inspectorLayout = new QVBoxLayout(inspectorContainer);
+    inspectorLayout->setContentsMargins(0, 0, 0, 0);
+    inspectorLayout->setSpacing(4);
+
+    m_prepInspectorTitle = new QLabel(QStringLiteral("舞台"), inspectorContainer);
+    m_prepInspectorTitle->setObjectName(QStringLiteral("prepInspectorTitle"));
+    {
+        QFont inspectorFont = m_prepInspectorTitle->font();
+        inspectorFont.setBold(true);
+        m_prepInspectorTitle->setFont(inspectorFont);
+    }
+    inspectorLayout->addWidget(m_prepInspectorTitle);
+
+    m_stageInspectorStack = new QStackedWidget(inspectorContainer);
+    m_stageInspectorStack->setObjectName(QStringLiteral("stageInspectorStack"));
+    inspectorLayout->addWidget(m_stageInspectorStack, 1);
+    splitLayout->addWidget(inspectorContainer);
+
+    // Inspector 属性页：VBox + 末尾 stretch（同 createPage，createRow 插到 stretch 前；
+    // 搜索命中重挂/清空挂回的 homeLayout 机制原样适用）
+    const auto makeInspectorPage = [this](const QString& objectName, QVBoxLayout*& layoutOut) {
+        auto* page = new QWidget(this);
+        page->setObjectName(objectName);
+        auto* layout = new QVBoxLayout(page);
+        layout->setContentsMargins(0, 4, 0, 0);
+        layout->setSpacing(4);
+        layout->addStretch();
+        m_stageInspectorStack->addWidget(page);
+        layoutOut = layout;
+        return page;
+    };
+    QVBoxLayout* stagePropsLayout = nullptr;
+    QVBoxLayout* prepPropsLayout = nullptr;
+    m_stagePropsPage = makeInspectorPage(QStringLiteral("stagePropsPage"), stagePropsLayout);
+    m_prepPropsPage = makeInspectorPage(QStringLiteral("prepPropsPage"), prepPropsLayout);
+
+    // -- 舞台属性页：宽/深/中心点偏移/颜色（原 4 行整体迁入） --
     m_widthSpin = makeStageSpin(1.0, 100000.0, QStringLiteral("stageWidthSpin"));
-    createRow(stageLayout, QStringLiteral("舞台：宽度"),
+    createRow(stagePropsLayout, QStringLiteral("舞台：宽度"),
               QStringLiteral("舞台左右方向的总宽度，单位 cm，取值 1～100000。"
                              "回车或失焦后生效并立即刷新视口。"
                              "舞台尺寸随存档保存（文件数据），不进入撤销历史。"),
               m_widthSpin);
 
     m_depthSpin = makeStageSpin(1.0, 100000.0, QStringLiteral("stageDepthSpin"));
-    createRow(stageLayout, QStringLiteral("舞台：深度"),
+    createRow(stagePropsLayout, QStringLiteral("舞台：深度"),
               QStringLiteral("舞台纵深方向（里外）的总深度，单位 cm，取值 1～100000。"
                              "回车或失焦后生效。"),
               m_depthSpin);
 
     m_offsetSpin = makeStageSpin(-100000.0, 100000.0, QStringLiteral("stageOffsetSpin"));
-    createRow(stageLayout, QStringLiteral("舞台：中心点偏移"),
+    createRow(stagePropsLayout, QStringLiteral("舞台：中心点偏移"),
               QStringLiteral("舞台左右对称中心相对原点（舞台最里边中点）的水平偏移，"
                              "单位 cm，可取负值，取值 -100000～100000。回车或失焦后生效。"),
               m_offsetSpin);
@@ -125,28 +179,75 @@ SettingsWindow::SettingsWindow(RuntimeData* runtimeData, EditorCore* editorCore,
             return;
         m_runtimeData->settings().setStageColor(chosen); // setter 即持久化
         updateColorSwatch();
+        updatePrepColorSwatch(); // 派生态准备区的取色源变了，色块文本同步刷新
         m_prepCanvas->update(); // 方块编辑器填色取舞台色，随选择立即重绘
         emit stageColorChanged();
     });
-    createRow(stageLayout, QStringLiteral("舞台：颜色"),
+    createRow(stagePropsLayout, QStringLiteral("舞台：颜色"),
               QStringLiteral("舞台矩形在画布上的填充色。这是软件自身设置，不随存档保存、"
                              "不影响文件的未保存状态；点击色块选择后立即生效并持久化。"),
               m_colorButton);
 
-    // 准备区宽高（阶段10）：无选中准备区时禁用（选中联动见 updatePrepRowStates）；
-    // editingFinished 提交，组装新列表走 setPrepAreas（直改直提交、不入撤销栈）
+    // -- 准备区属性页：X/Y/宽/高（editingFinished 组装列表走 setPrepAreas，直改直
+    // 提交、不入撤销栈）+ 颜色（色块按钮） --
+    m_prepXSpin = makeStageSpin(-100000.0, 100000.0, QStringLiteral("prepXSpin"));
+    createRow(prepPropsLayout, QStringLiteral("准备区：X"),
+              QStringLiteral("当前选中准备区中心的水平坐标（场景绝对坐标，原点为舞台最里边"
+                             "中点），单位 cm，可取负值，取值 -100000～100000。"
+                             "回车或失焦后生效，与画布拖拽双向同步。"),
+              m_prepXSpin);
+
+    m_prepYSpin = makeStageSpin(-100000.0, 100000.0, QStringLiteral("prepYSpin"));
+    createRow(prepPropsLayout, QStringLiteral("准备区：Y"),
+              QStringLiteral("当前选中准备区中心的纵深坐标，单位 cm；大于舞台深度即台下区域。"
+                             "回车或失焦后生效，与画布拖拽双向同步。"),
+              m_prepYSpin);
+
     m_prepWidthSpin = makeStageSpin(1.0, 100000.0, QStringLiteral("prepWidthSpin"));
-    createRow(stageLayout, QStringLiteral("准备区：宽度"),
+    createRow(prepPropsLayout, QStringLiteral("准备区：宽度"),
               QStringLiteral("当前选中准备区的宽度，单位 cm，取值 1～100000。"
                              "回车或失焦后生效。准备区布局随存档保存（文件数据），"
                              "不进入撤销历史。"),
               m_prepWidthSpin);
 
     m_prepHeightSpin = makeStageSpin(1.0, 100000.0, QStringLiteral("prepHeightSpin"));
-    createRow(stageLayout, QStringLiteral("准备区：高度"),
+    createRow(prepPropsLayout, QStringLiteral("准备区：高度"),
               QStringLiteral("当前选中准备区的高度（纵深方向），单位 cm，取值 1～100000。"
                              "回车或失焦后生效。"),
               m_prepHeightSpin);
+
+    // 准备区颜色（阶段11）：color 无效 = 派生态（跟随舞台色派生，存档存空串）；
+    // 色块按钮弹 QColorDialog 指定独立色，组装列表走 setPrepAreas 直改直提交
+    m_prepColorButton = new QPushButton(this);
+    m_prepColorButton->setObjectName(QStringLiteral("prepColorButton"));
+    m_prepColorButton->setFixedSize(200, 28);
+    updatePrepColorSwatch();
+    connect(m_prepColorButton, &QPushButton::clicked, this, [this] {
+        const QString selectedId = m_prepCanvas->selectedBlockId();
+        const PrepAreaData* area = m_editorCore->findPrepArea(selectedId); // 舞台方块 → nullptr
+        if (!area)
+            return;
+        // 派生态以派生色（与渲染回退同式）为对话框起点，选中原样色即"钉死"为独立色
+        const QColor current = area->color.isValid() ? area->color
+            : m_runtimeData->settings().stageColor().darker(160);
+        const QColor chosen = QColorDialog::getColor(current, this, QStringLiteral("准备区颜色"),
+                                                     QColorDialog::DontUseNativeDialog);
+        if (!chosen.isValid() || chosen == area->color)
+            return;
+        QList<PrepAreaData> next = m_runtimeData->fileData().prepAreas;
+        for (PrepAreaData& entry : next) {
+            if (entry.id == selectedId) {
+                entry.color = chosen;
+                break;
+            }
+        }
+        // 直改直提交、不入撤销栈（同 setStage 先例）；fileDataChanged 回显+回喂画布
+        m_editorCore->setPrepAreas(next);
+    });
+    createRow(prepPropsLayout, QStringLiteral("准备区：颜色"),
+              QStringLiteral("当前选中准备区的填充色。默认跟随舞台色派生（不单独存色）；"
+                             "点击色块指定独立颜色，随存档保存（文件数据），不进入撤销历史。"),
+              m_prepColorButton);
 
     // ---- 画布分类（显示网格/网格吸附/网格间距/吸附距离：即改即写 AppSettings 生效） ----
     m_gridVisibleCheck = new QCheckBox(this);
@@ -226,6 +327,10 @@ SettingsWindow::SettingsWindow(RuntimeData* runtimeData, EditorCore* editorCore,
             this, &SettingsWindow::commitStageSpins);
     connect(m_offsetSpin, &QAbstractSpinBox::editingFinished,
             this, &SettingsWindow::commitStageSpins);
+    connect(m_prepXSpin, &QAbstractSpinBox::editingFinished,
+            this, &SettingsWindow::commitPrepSpins);
+    connect(m_prepYSpin, &QAbstractSpinBox::editingFinished,
+            this, &SettingsWindow::commitPrepSpins);
     connect(m_prepWidthSpin, &QAbstractSpinBox::editingFinished,
             this, &SettingsWindow::commitPrepSpins);
     connect(m_prepHeightSpin, &QAbstractSpinBox::editingFinished,
@@ -254,7 +359,7 @@ SettingsWindow::SettingsWindow(RuntimeData* runtimeData, EditorCore* editorCore,
                 m_editorCore->setPrepAreas(next);
             });
     connect(m_prepCanvas, &PrepAreaCanvas::selectionChanged,
-            this, &SettingsWindow::updatePrepRowStates);
+            this, &SettingsWindow::updatePrepInspector);
 
     // 新建/打开文件后回显同步；任何 fileDataChanged 都刷新（值相同则 setValue 无副作用）
     connect(m_runtimeData, &RuntimeData::fileDataChanged,
@@ -354,9 +459,10 @@ void SettingsWindow::refreshStageControls()
     m_depthSpin->setValue(stage.depth);
     m_offsetSpin->setValue(stage.centerOffset);
 
-    // 方块编辑器回喂（含准备区列表/舞台矩形；画布选中态自行校验存在性）
+    // 方块编辑器回喂（含准备区列表/舞台矩形；画布选中态自行校验存在性）；
+    // Inspector 两页数值回显（准备区页按当前选中方块）
     feedPrepCanvas();
-    updatePrepRowStates();
+    updatePrepInspector();
 }
 
 QRectF SettingsWindow::stageRect() const
@@ -370,44 +476,69 @@ void SettingsWindow::feedPrepCanvas()
     m_prepCanvas->setContent(stageRect(), m_runtimeData->fileData().prepAreas);
 }
 
-void SettingsWindow::updatePrepRowStates()
+void SettingsWindow::updatePrepInspector()
 {
-    // 选中联动：选中舞台 → 舞台属性行可用、准备区行禁用；选中准备区 → 反之
+    // 选中方块联动（阶段11）：Inspector 标题 = 选中对象名，属性页栈切到对应页
     const QString selectedId = m_prepCanvas->selectedBlockId();
-    const bool stageSelected = selectedId == PrepAreaCanvas::stageBlockId();
-    m_widthSpin->setEnabled(stageSelected);
-    m_depthSpin->setEnabled(stageSelected);
-    m_offsetSpin->setEnabled(stageSelected);
-    m_colorButton->setEnabled(stageSelected);
-    m_prepWidthSpin->setEnabled(!stageSelected);
-    m_prepHeightSpin->setEnabled(!stageSelected);
-
-    // 回显选中准备区的宽高（屏蔽信号防回环；舞台选中时保持上次值不变）
-    if (!stageSelected) {
-        if (const PrepAreaData* area = m_editorCore->findPrepArea(selectedId)) {
-            const QSignalBlocker blockPrepWidth(m_prepWidthSpin);
-            const QSignalBlocker blockPrepHeight(m_prepHeightSpin);
-            m_prepWidthSpin->setValue(area->width);
-            m_prepHeightSpin->setValue(area->height);
-        }
+    if (selectedId == PrepAreaCanvas::stageBlockId()) {
+        m_prepInspectorTitle->setText(QStringLiteral("舞台"));
+        m_stageInspectorStack->setCurrentWidget(m_stagePropsPage);
+        return;
     }
+    const PrepAreaData* area = m_editorCore->findPrepArea(selectedId);
+    if (!area)
+        return; // 防御：选中 id 已不存在（setContent 会先回落选中舞台）
+    m_prepInspectorTitle->setText(area->name);
+    m_stageInspectorStack->setCurrentWidget(m_prepPropsPage);
+
+    // 回显选中准备区的 X/Y/宽/高/颜色（屏蔽信号防回环）
+    const QSignalBlocker blockX(m_prepXSpin);
+    const QSignalBlocker blockY(m_prepYSpin);
+    const QSignalBlocker blockWidth(m_prepWidthSpin);
+    const QSignalBlocker blockHeight(m_prepHeightSpin);
+    m_prepXSpin->setValue(area->x);
+    m_prepYSpin->setValue(area->y);
+    m_prepWidthSpin->setValue(area->width);
+    m_prepHeightSpin->setValue(area->height);
+    updatePrepColorSwatch();
+}
+
+void SettingsWindow::updatePrepColorSwatch()
+{
+    // 派生态（color invalid）显示派生色并标注"跟随舞台色"；独立色显示色值
+    const PrepAreaData* area = m_editorCore->findPrepArea(m_prepCanvas->selectedBlockId());
+    QColor shown = m_runtimeData->settings().stageColor().darker(160); // 与渲染回退同式
+    QString text = shown.name() + QStringLiteral("（跟随舞台色）");
+    if (area && area->color.isValid()) {
+        shown = area->color;
+        text = shown.name();
+    }
+    m_prepColorButton->setText(text);
+    m_prepColorButton->setStyleSheet(
+        QStringLiteral("background-color: %1; color: %2;")
+            .arg(shown.name(),
+                 shown.lightness() < 128 ? QStringLiteral("white")
+                                         : QStringLiteral("black")));
 }
 
 void SettingsWindow::commitPrepSpins()
 {
     const QString selectedId = m_prepCanvas->selectedBlockId();
     if (selectedId == PrepAreaCanvas::stageBlockId())
-        return; // 未选中准备区（行已禁用，防御性兜底）
+        return; // 未选中准备区（准备区页不可见，防御性兜底）
     QList<PrepAreaData> next = m_runtimeData->fileData().prepAreas;
     for (PrepAreaData& area : next) {
         if (area.id == selectedId) {
-            if (area.width == m_prepWidthSpin->value()
+            if (area.x == m_prepXSpin->value() && area.y == m_prepYSpin->value()
+                && area.width == m_prepWidthSpin->value()
                 && area.height == m_prepHeightSpin->value())
                 return; // 回车/失焦但未改值：不打扰数据层
+            area.x = m_prepXSpin->value();
+            area.y = m_prepYSpin->value();
             area.width = m_prepWidthSpin->value();
             area.height = m_prepHeightSpin->value();
             // 直改直提交、不入撤销栈（同 setStage 先例）；spin 下限 1.0 使非法
-            // 尺寸到不了业务层（业务层仍做防御性拒绝，由 DataLayerSelfTest 覆盖）
+            // 宽高到不了业务层（业务层仍做防御性拒绝，由 DataLayerSelfTest 覆盖）
             m_editorCore->setPrepAreas(next);
             return;
         }
