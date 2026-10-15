@@ -506,6 +506,16 @@ bool EditorCore::setStage(const StageData& stage)
     return true;
 }
 
+// ---- 双帧段选中态（阶段12）----
+
+void EditorCore::setActiveSegment(const std::optional<SegmentRef>& segment)
+{
+    if (m_activeSegment == segment)
+        return; // 相同值不重发信号（渲染层每帧都可能重报）
+    m_activeSegment = segment;
+    emit activeSegmentChanged();
+}
+
 // ---- 台下准备区（阶段10）----
 
 const PrepAreaData* EditorCore::findPrepArea(const QString& id) const

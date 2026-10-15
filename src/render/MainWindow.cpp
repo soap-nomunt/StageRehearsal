@@ -51,6 +51,10 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::updateWindowTitle);
     connect(m_runtimeData, &RuntimeData::fileDataChanged,
             this, &MainWindow::updateWindowTitle);
+    // 阶段12：双帧段选中态 → 主视口幽灵/白线可视化
+    connect(m_editorCore, &EditorCore::activeSegmentChanged, m_scene, [this] {
+        m_scene->setActiveSegment(m_editorCore->activeSegment());
+    });
 
     // 阶段8：构造函数不再加载任何文件（构造即默认空舞台，无文件 IO）；
     // 启动时的存档选择由启动页（runStartDialogLoop）决定，截图自测模式直开示例存档

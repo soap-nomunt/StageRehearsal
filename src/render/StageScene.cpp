@@ -9,6 +9,7 @@
 #include "data/AppSettings.h"
 #include "data/RuntimeData.h"
 
+#include <QGraphicsLineItem>
 #include <QPainter>
 
 #include <cmath>
@@ -32,6 +33,9 @@ StageScene::StageScene(RuntimeData* runtimeData, SelectionModel* selection,
 void StageScene::rebuild()
 {
     clear();
+    // clear() 连幽灵/白线一起删了：重置覆盖物句柄，末尾按段引用重铺
+    m_segmentGhosts.clear();
+    m_segmentLine = nullptr;
 
     const FileData& file = m_runtimeData->fileData();
     for (const ObjectData& object : file.objects) {
@@ -59,6 +63,7 @@ void StageScene::rebuild()
 
     applySelectionHighlight(); // 全量重建后按 id 恢复选中高亮
     applyDisplayTransforms();  // 图元显示当前时刻插值结果（而非静态 transform）
+    refreshSegmentOverlay();   // 双帧态覆盖物随重建重铺（段引用悬空则由画布侧清除）
 
     update(); // 背景依赖 StageData，触发重绘
 }
@@ -92,7 +97,7 @@ StageObjectItem* StageScene::itemById(const QString& id) const
 {
     for (QGraphicsItem* item : items()) {
         if (auto* stageItem = dynamic_cast<StageObjectItem*>(item)) {
-            if (stageItem->objectId() == id)
+            if (!stageItem->isGhost() && stageItem->objectId() == id)
                 return stageItem;
         }
     }
@@ -101,10 +106,12 @@ StageObjectItem* StageScene::itemById(const QString& id) const
 
 StageObjectItem* StageScene::topStageItemAt(const QPointF& scenePos) const
 {
-    // items() 返回按叠放次序自上而下排列
+    // items() 返回按叠放次序自上而下排列；幽灵不参与命中
     for (QGraphicsItem* item : items(scenePos)) {
-        if (auto* stageItem = dynamic_cast<StageObjectItem*>(item))
-            return stageItem;
+        if (auto* stageItem = dynamic_cast<StageObjectItem*>(item)) {
+            if (!stageItem->isGhost())
+                return stageItem;
+        }
     }
     return nullptr;
 }
@@ -113,8 +120,10 @@ QList<StageObjectItem*> StageScene::stageItems() const
 {
     QList<StageObjectItem*> result;
     for (QGraphicsItem* item : items()) {
-        if (auto* stageItem = dynamic_cast<StageObjectItem*>(item))
-            result.append(stageItem);
+        if (auto* stageItem = dynamic_cast<StageObjectItem*>(item)) {
+            if (!stageItem->isGhost()) // 幽灵不进选中/高亮/框选等对象遍历
+                result.append(stageItem);
+        }
     }
     return result;
 }
@@ -123,6 +132,80 @@ void StageScene::applySelectionHighlight()
 {
     for (StageObjectItem* item : stageItems())
         item->setHighlighted(m_selection->isSelected(item->objectId()));
+}
+
+// ---- 双帧选中态可视化（阶段12）----
+
+void StageScene::setActiveSegment(const std::optional<SegmentRef>& segment)
+{
+    m_segment = segment;
+    refreshSegmentOverlay();
+}
+
+void StageScene::refreshSegmentOverlay()
+{
+    // 先清旧覆盖物（QGraphicsItem 析构自动离场景）
+    for (StageObjectItem* ghost : m_segmentGhosts)
+        delete ghost;
+    m_segmentGhosts.clear();
+    delete m_segmentLine;
+    m_segmentLine = nullptr;
+
+    if (!m_segment)
+        return;
+
+    // 解析对象与两帧（防御：对象/帧缺失则整体不画；态清除由 TimelineCanvas 侧保证）
+    const ObjectData* target = nullptr;
+    for (const ObjectData& object : m_runtimeData->fileData().objects) {
+        if (object.id == m_segment->objectId) {
+            target = &object;
+            break;
+        }
+    }
+    if (!target)
+        return;
+    const Keyframe* fromKey = nullptr;
+    const Keyframe* toKey = nullptr;
+    for (const Keyframe& key : target->keyframes) {
+        if (qAbs(key.t - m_segment->from) <= TimelinePlayer::kTimeEpsilon)
+            fromKey = &key;
+        if (qAbs(key.t - m_segment->to) <= TimelinePlayer::kTimeEpsilon)
+            toKey = &key;
+    }
+    if (!fromKey || !toKey)
+        return;
+
+    // 直线白线：两端点 = 两帧位置，cosmetic 恒宽不随缩放变化；压在对象与幽灵之下
+    QPen linePen(Qt::white);
+    linePen.setCosmetic(true);
+    linePen.setWidth(2);
+    m_segmentLine = addLine(QLineF(QPointF(fromKey->x, fromKey->y),
+                                   QPointF(toKey->x, toKey->y)),
+                            linePen);
+    m_segmentLine->setZValue(-2.0);
+
+    // 幽灵：复用 ActorItem/ScreenItem 渲染（含朝向三角/凸点），位姿取关键帧数据值
+    // （与插值显示值分离）；前帧不透明、后帧 0.4 透明；幽灵标记 → 选中/命中/显示值
+    // 驱动全部跳过（itemById/topStageItemAt/stageItems 过滤）
+    const auto makeGhost = [this, target](const Keyframe& key, qreal opacity) {
+        StageObjectItem* ghost = nullptr;
+        switch (target->type) {
+        case ObjectType::Actor:  ghost = new ActorItem(*target);  break;
+        case ObjectType::Screen: ghost = new ScreenItem(*target); break;
+        default: return static_cast<StageObjectItem*>(nullptr); // 空对象/道具不渲染
+        }
+        ghost->setGhost(true);
+        ghost->setPos(key.x, key.y);
+        ghost->setRotation(RenderUtil::toQtRotation(key.rotation));
+        ghost->setOpacity(opacity);
+        ghost->setZValue(-1.0); // 白线之上、正常对象之下
+        addItem(ghost);
+        return ghost;
+    };
+    if (StageObjectItem* ghost = makeGhost(*fromKey, 1.0))
+        m_segmentGhosts.append(ghost);
+    if (StageObjectItem* ghost = makeGhost(*toKey, 0.4))
+        m_segmentGhosts.append(ghost);
 }
 
 void StageScene::drawBackground(QPainter* painter, const QRectF& rect)

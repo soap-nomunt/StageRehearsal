@@ -9,14 +9,24 @@
 // 编辑命令被拒（打帧弹窗选"否"）时由 StageView 调 applyDisplayTransforms 回弹图元。
 // 阶段10：台下准备区画在背景层（舞台色派生填充 + 描边 + 名称标签），主视口
 // 只读展示；sceneRect/resetView 以 contentRect()（舞台 ∪ 准备区包围盒）为准。
+// 阶段12：双帧选中态可视化——EditorCore::activeSegment 非空时绘制前帧幽灵
+// （不透明）+ 后帧幽灵（0.4 透明）+ 两帧位置直线白线（恒宽 cosmetic）；
+// 幽灵复用 ActorItem/ScreenItem 渲染（含朝向），打幽灵标记不参与选中/命中/
+// 显示值驱动，位姿取关键帧数据值（与插值显示值分离）；态消失（nullopt）移除，
+// 全量重建后按段引用重铺。
 
 #include <QGraphicsScene>
 #include <QRectF>
+
+#include <optional>
+
+#include "business/EditorCore.h" // SegmentRef
 
 class RuntimeData;
 class SelectionModel;
 class StageObjectItem;
 class TimelinePlayer;
+class QGraphicsLineItem;
 
 class StageScene : public QGraphicsScene
 {
@@ -41,14 +51,22 @@ public:
     StageObjectItem* topStageItemAt(const QPointF& scenePos) const; // 最上层演员/屏风，无则空
     QList<StageObjectItem*> stageItems() const;
 
+    // 双帧段选中态（阶段12）：设置/清除幽灵与白线覆盖物；nullopt = 态消失移除
+    void setActiveSegment(const std::optional<SegmentRef>& segment);
+
 protected:
     void drawBackground(QPainter* painter, const QRectF& rect) override;
 
 private:
     void applySelectionHighlight(); // 按 SelectionModel 的 id 刷新全部图元高亮
+    void refreshSegmentOverlay();   // 按 m_segment 重建幽灵与白线（rebuild 后重铺）
 
     RuntimeData* m_runtimeData = nullptr; // 不拥有
     SelectionModel* m_selection = nullptr; // 不拥有
     TimelinePlayer* m_player = nullptr;    // 不拥有
     QRectF m_stageRect;                   // x ∈ [centerOffset−width/2, centerOffset+width/2]，y ∈ [0, depth]
+
+    std::optional<SegmentRef> m_segment;       // 双帧段引用（运行时状态）
+    QList<StageObjectItem*> m_segmentGhosts;   // 前帧（不透明）+ 后帧（0.4）幽灵
+    QGraphicsLineItem* m_segmentLine = nullptr; // 两帧位置直线白线
 };

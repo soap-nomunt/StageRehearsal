@@ -62,6 +62,11 @@
 // 平移后吞掉 contextMenuEvent 不弹菜单——合成右键拖拽 + 补发合成 contextMenuEvent
 // 验证）；画布无滚动条，平移限界为内容包围盒始终与控件相交（疯狂拖拽不丢内容）；
 // 右键点击（未越阈值）仍弹菜单（新建/删除回归）。
+// 阶段12 追加：双帧选中态 + 幽灵与直线路径可视化（纯渲染，数据层零改动）——
+// 时间轴 Ctrl 加选同对象相邻两帧进入双帧态（EditorCore::activeSegment），
+// 主视口绘制前帧幽灵（不透明）+ 后帧幽灵（0.4）+ 直线白线（幽灵不参与命中/
+// 选中/显示值驱动）；加选不相邻/跨对象帧 = 替换为新单选；清除路径全覆盖
+// （点空白/单选他帧/轨道选中变化/播放开始/fileReplaced/命令提交后防御）。
 //
 // 运行（Git Bash，项目根目录）：
 //   QT_QPA_PLATFORM=offscreen ./build/Debug/InteractionSelfTest.exe
@@ -92,6 +97,7 @@
 #include <QDoubleSpinBox>
 #include <QDropEvent>
 #include <QFile>
+#include <QGraphicsLineItem>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -2489,6 +2495,193 @@ int main(int argc, char* argv[])
                 && entry.toObject().contains(QStringLiteral("color"));
         CHECK(allHaveColorKey, "阶段11：另存后 prepAreas 恒写 color 键");
         CHECK(!runtime15->isDirty(), "阶段11：另存后干净");
+    }
+
+    // ==================== 阶段12：双帧选中态 + 幽灵与直线路径可视化（纯渲染） ====================
+    {
+        MainWindow w16;
+        w16.show();
+        QTest::qWaitForWindowExposed(&w16);
+        auto* core16 = w16.findChild<EditorCore*>();
+        auto* runtime16 = w16.findChild<RuntimeData*>();
+        auto* view16 = qobject_cast<StageView*>(w16.centralWidget());
+        auto* scene16 = qobject_cast<StageScene*>(view16->scene());
+        auto* timeline16 = w16.findChild<TimelineWidget*>();
+        auto* canvas16 = w16.findChild<QWidget*>(QStringLiteral("timelineCanvas"));
+        CHECK(core16 && runtime16 && view16 && scene16 && timeline16 && canvas16,
+              "阶段12：组件装配完整");
+
+        // 造数据（业务入口直调）：演员甲 4 帧（t=1/2/3/4，位置递进、朝向各异），
+        // 演员乙 2 帧（跨对象用例）
+        CHECK(core16->createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "阶段12：创建演员甲");
+        const QString actorA16 = runtime16->fileData().objects.last().id;
+        CHECK(core16->createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "阶段12：创建演员乙");
+        const QString actorB16 = runtime16->fileData().objects.last().id;
+        core16->upsertKeyframe(actorA16, Keyframe { 1.0, 100.0, 100.0, 0.0 });
+        core16->upsertKeyframe(actorA16, Keyframe { 2.0, 200.0, 100.0, 45.0 });
+        core16->upsertKeyframe(actorA16, Keyframe { 3.0, 300.0, 100.0, 90.0 });
+        core16->upsertKeyframe(actorA16, Keyframe { 4.0, 400.0, 100.0, 135.0 });
+        core16->upsertKeyframe(actorB16, Keyframe { 1.0, -200.0, 300.0, 0.0 });
+        core16->upsertKeyframe(actorB16, Keyframe { 2.0, -300.0, 300.0, 0.0 });
+
+        // 场景覆盖物快照：幽灵（StageObjectItem::isGhost，按透明度分前后帧）+ 白线
+        struct OverlayState {
+            int ghosts = 0;
+            qreal opacity[2] = { -1.0, -1.0 }; // [0]=前帧（不透明） [1]=后帧（0.4）
+            QPointF pos[2];
+            double rotation[2] = { 0.0, 0.0 };
+            bool hasLine = false;
+            QLineF line;
+        };
+        const auto overlayState = [scene16] {
+            OverlayState o;
+            for (QGraphicsItem* item : scene16->items()) {
+                if (auto* stageItem = dynamic_cast<StageObjectItem*>(item)) {
+                    if (!stageItem->isGhost())
+                        continue;
+                    ++o.ghosts;
+                    const int slot = stageItem->opacity() > 0.9 ? 0 : 1;
+                    o.opacity[slot] = stageItem->opacity();
+                    o.pos[slot] = stageItem->pos();
+                    o.rotation[slot] = stageItem->rotation();
+                } else if (auto* lineItem = dynamic_cast<QGraphicsLineItem*>(item)) {
+                    o.hasLine = true;
+                    o.line = lineItem->line();
+                }
+            }
+            return o;
+        };
+        const auto expectSegment = [core16](const QString& id, double from, double to) {
+            const std::optional<SegmentRef> seg = core16->activeSegment();
+            return seg.has_value() && seg->objectId == id
+                && near(seg->from, from, 0.001) && near(seg->to, to, 0.001);
+        };
+        const auto clickKey = [canvas16, timeline16](const QString& id, double t,
+                                                     bool ctrl = false) {
+            QTest::mouseClick(canvas16, Qt::LeftButton,
+                              ctrl ? Qt::ControlModifier : Qt::NoModifier,
+                              timeline16->canvasPosFor(id, t));
+        };
+        const auto formSegment = [canvas16, &clickKey](const QString& id, double from, double to) {
+            QTest::keyClick(canvas16, Qt::Key_Escape); // 清画布选择，避免既有选中干扰
+            clickKey(id, from);      // 单选第一帧
+            clickKey(id, to, true);  // Ctrl 加选相邻第二帧
+        };
+
+        // ---- 单选不进双帧态；Ctrl 加选相邻帧进入 ----
+        clickKey(actorA16, 2.0);
+        CHECK(!core16->activeSegment().has_value(), "阶段12：单选关键帧不进双帧态");
+        clickKey(actorA16, 3.0, true);
+        CHECK(expectSegment(actorA16, 2.0, 3.0), "阶段12：Ctrl 加选相邻帧进入双帧态");
+        {
+            const OverlayState o = overlayState();
+            CHECK(o.ghosts == 2 && o.hasLine, "阶段12：双帧态绘制前/后帧幽灵 + 直线白线");
+            CHECK(near(o.pos[0].x(), 200.0, 0.01) && near(o.pos[0].y(), 100.0, 0.01)
+                      && near(o.opacity[0], 1.0, 0.001)
+                      && near(o.rotation[0], 45.0, 0.01),
+                  "阶段12：前帧幽灵不透明，位姿（含朝向）= 关键帧数据值");
+            CHECK(near(o.pos[1].x(), 300.0, 0.01) && near(o.opacity[1], 0.4, 0.001)
+                      && near(o.rotation[1], 90.0, 0.01),
+                  "阶段12：后帧幽灵 0.4 透明，位姿 = 关键帧数据值");
+            CHECK(near(o.line.x1(), 200.0, 0.01) && near(o.line.y1(), 100.0, 0.01)
+                      && near(o.line.x2(), 300.0, 0.01) && near(o.line.y2(), 100.0, 0.01),
+                  "阶段12：白线两端点 = 两帧关键帧位置");
+        }
+        // 幽灵不参与选中与命中：幽灵位置命中最上层对象 = 空（真实演员此刻不在此处）；
+        // 对象遍历不含幽灵（2 个真实对象）
+        CHECK(scene16->topStageItemAt(QPointF(200.0, 100.0)) == nullptr,
+              "阶段12：幽灵不参与命中");
+        CHECK(scene16->stageItems().size() == 2, "阶段12：幽灵不进对象遍历（选中/框选）");
+
+        // 幽灵与插值显示值分离：游标移到段中点，真实图元走插值，幽灵不动
+        core16->timelinePlayer()->seekTo(2.5);
+        CHECK(near(scene16->itemById(actorA16)->pos().x(), 250.0, 0.01),
+              "阶段12：游标移动正常驱动插值显示值");
+        CHECK(near(overlayState().pos[0].x(), 200.0, 0.01)
+                  && near(overlayState().pos[1].x(), 300.0, 0.01),
+              "阶段12：幽灵保持关键帧数据值（不随游标插值）");
+
+        // 截图存档人工复核（游标移回段外：真实图元让开，两幽灵各守帧位、白线显露）
+        core16->timelinePlayer()->seekTo(0.0);
+        view16->fitInView(QRectF(50.0, 0.0, 400.0, 200.0), Qt::KeepAspectRatio);
+        view16->grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage12-segment-ghosts.png")));
+
+        // ---- Ctrl 反选其中一帧 → 退出双帧态，覆盖物移除 ----
+        clickKey(actorA16, 3.0, true);
+        CHECK(!core16->activeSegment().has_value(), "阶段12：Ctrl 反选一帧退出双帧态");
+        {
+            const OverlayState o = overlayState();
+            CHECK(o.ghosts == 0 && !o.hasLine, "阶段12：双帧态消失后幽灵与白线移除");
+        }
+
+        // ---- 加选不相邻帧 → 替换为新单选（中间隔 t=3） ----
+        clickKey(actorA16, 4.0, true); // 当前 {2}，加选 4 不相邻
+        CHECK(!core16->activeSegment().has_value(),
+              "阶段12：加选不相邻帧不进双帧态（替换为新单选）");
+        clickKey(actorA16, 3.0, true); // 若已替换为单选 {4}：加选相邻 3 → 双帧 {3,4}
+        CHECK(expectSegment(actorA16, 3.0, 4.0),
+              "阶段12：替换生效后再加选相邻帧进入双帧态（证明已替换为单选）");
+
+        // ---- 跨对象加选 → 替换为新单选 ----
+        clickKey(actorA16, 2.0);       // 单选演员甲 t=2
+        clickKey(actorB16, 1.0, true); // Ctrl 加选演员乙的帧 → 替换
+        CHECK(!core16->activeSegment().has_value(), "阶段12：跨对象加选替换为新单选");
+        clickKey(actorB16, 2.0, true); // 已替换为 {乙@1}：加选相邻 {乙@2} → 双帧 {1,2}
+        CHECK(expectSegment(actorB16, 1.0, 2.0),
+              "阶段12：跨对象替换后再加选相邻帧进入双帧态");
+
+        // ---- 清除路径：点空白（轨道行无帧处 = 选中轨道，清关键帧选择） ----
+        QTest::mouseClick(canvas16, Qt::LeftButton, Qt::NoModifier,
+                          timeline16->canvasPosFor(actorB16, 8.0));
+        CHECK(!core16->activeSegment().has_value(), "阶段12：点空白（选轨道）清除双帧态");
+
+        // ---- 清除路径：单选他帧 ----
+        formSegment(actorA16, 2.0, 3.0);
+        CHECK(expectSegment(actorA16, 2.0, 3.0), "阶段12：双帧态重建（演员甲 2→3）");
+        clickKey(actorA16, 4.0);
+        CHECK(!core16->activeSegment().has_value(), "阶段12：单选他帧清除双帧态");
+
+        // ---- 清除路径：轨道选中变化（外部对象单选联动画布轨道选中） ----
+        formSegment(actorA16, 2.0, 3.0);
+        core16->selection()->select(actorA16);
+        CHECK(!core16->activeSegment().has_value(), "阶段12：轨道选中变化清除双帧态");
+
+        // ---- 清除路径：播放开始 ----
+        formSegment(actorA16, 2.0, 3.0);
+        core16->timelinePlayer()->play();
+        CHECK(!core16->activeSegment().has_value(), "阶段12：播放开始清除双帧态");
+        core16->timelinePlayer()->pause();
+
+        // ---- 清除路径：命令提交后防御（段内打帧破坏相邻性） ----
+        formSegment(actorA16, 2.0, 3.0);
+        CHECK(core16->upsertKeyframe(actorA16, Keyframe { 2.5, 250.0, 100.0, 60.0 }),
+              "阶段12：段内打帧（t=2.5）");
+        CHECK(!core16->activeSegment().has_value(),
+              "阶段12：段内打帧破坏相邻性 → 防御清除双帧态");
+        CHECK(overlayState().ghosts == 0, "阶段12：防御清除后幽灵移除");
+        core16->undo(); // 撤销打帧，帧列表恢复 1/2/3/4
+
+        // ---- 清除路径：命令提交后防御（删除其中一帧） ----
+        formSegment(actorA16, 2.0, 3.0);
+        CHECK(core16->removeKeyframes({ qMakePair(actorA16, 3.0) }), "阶段12：删除后帧");
+        CHECK(!core16->activeSegment().has_value(),
+              "阶段12：删除其中一帧 → 防御清除双帧态");
+        {
+            const OverlayState o = overlayState();
+            CHECK(o.ghosts == 0 && !o.hasLine, "阶段12：删帧后场景无覆盖物");
+        }
+        core16->undo(); // 恢复帧列表
+
+        // ---- 清除路径：fileReplaced（新建文件） ----
+        formSegment(actorA16, 2.0, 3.0);
+        CHECK(expectSegment(actorA16, 2.0, 3.0), "阶段12：双帧态重建（新建前）");
+        runtime16->newFile();
+        CHECK(!core16->activeSegment().has_value(), "阶段12：fileReplaced 清除双帧态");
+        {
+            const OverlayState o = overlayState();
+            CHECK(o.ghosts == 0 && !o.hasLine, "阶段12：新建后场景无覆盖物");
+        }
     }
 
     out() << Qt::endl;

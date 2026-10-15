@@ -51,6 +51,11 @@ QString groupTitle(ObjectType type, int count)
 // 画布统一选择模型（局部状态）：游标/关键帧/场次标签/轨道四类互斥选中，
 // 轨道选中与对象 SelectionModel 联动；命中优先级：关键帧点 > 场次标签 >
 // 游标手柄/线 > 轨道行 > 空白。
+// 阶段12 双帧态：恰好选中同一对象相邻两帧（两帧间无该对象其他关键帧）时派生
+// SegmentRef 上报 EditorCore（activeSegment），主视口据以绘制两帧幽灵+直线；
+// Ctrl 加选第二帧不满足同对象相邻 = 替换为新单选。清除路径：点空白/单选他帧
+// 他对象/轨道选中变化/播放开始/fileReplaced/命令提交后防御（rebuildRows 剔除
+// 失效帧引用后重派生，帧或相邻性不存在即清除）。
 class TimelineCanvas : public QWidget {
 public:
     TimelineCanvas(EditorCore* core, QScrollArea* scrollOwner, QWidget* parent = nullptr)
@@ -64,6 +69,9 @@ public:
     }
 
     double pxPerSec() const { return m_pxPerSec; }
+
+    // 阶段12：播放开始/fileReplaced 等外部路径清除双帧态（不动画布选择本身）
+    void clearActiveSegment() { m_core->setActiveSegment(std::nullopt); }
 
     double timeToX(double t) const { return TimelineWidget::kNameColW + t * m_pxPerSec; }
     double xToTime(double x) const { return (x - TimelineWidget::kNameColW) / m_pxPerSec; }
@@ -130,6 +138,10 @@ public:
             m_sel = CanvasSel::None;
         }
 
+        // 命令提交后防御（阶段12）：剔除失效帧引用后重派生段——
+        // 帧不存在或相邻性被破坏（段内打帧/移帧/删帧/撤销重做）即清除双帧态
+        updateActiveSegment();
+
         update();
     }
 
@@ -150,6 +162,7 @@ public:
             m_sel = CanvasSel::None;
             m_selectedTrackId.clear();
         }
+        updateActiveSegment(); // 轨道选中变化清除双帧态（阶段12）
         update();
     }
 
@@ -483,6 +496,7 @@ protected:
             m_labelDragging = false;
         }
         m_labelDragArmed = false;
+        updateActiveSegment(); // 拖帧提交后选中引用就地重建过（未经 selectKeys）
         update();
     }
 
@@ -729,6 +743,7 @@ private:
         m_selectedKeys.clear();
         m_selectedLabel = -1;
         m_selectedTrackId.clear();
+        updateActiveSegment();
         update();
     }
 
@@ -738,6 +753,7 @@ private:
         m_selectedKeys = refs;
         m_selectedLabel = -1;
         m_selectedTrackId.clear();
+        updateActiveSegment();
         update();
     }
 
@@ -747,6 +763,7 @@ private:
         m_selectedLabel = index;
         m_selectedKeys.clear();
         m_selectedTrackId.clear();
+        updateActiveSegment();
         update();
     }
 
@@ -757,6 +774,7 @@ private:
         m_selectedKeys.clear();
         m_selectedLabel = -1;
         m_core->selection()->select(objectId); // 联动对象选中（Hierarchy/Inspector/视口）
+        updateActiveSegment();
         update();
     }
 
@@ -770,6 +788,7 @@ private:
         m_selectedTrackId.clear();
         if (hadTrack)
             m_core->selection()->clear();
+        updateActiveSegment();
         update();
     }
 
@@ -797,6 +816,7 @@ private:
         }
         m_selectedKeys = kept;
         m_sel = kept.isEmpty() ? CanvasSel::None : CanvasSel::Keys;
+        updateActiveSegment();
         update();
     }
 
@@ -855,8 +875,64 @@ private:
                 return;
             }
         }
+        // 阶段12 相邻性约束：加选第二帧限同一对象且相邻（两帧间无该对象其他关键帧），
+        // 满足则进入双帧态；不相邻/跨对象 = 替换为新单选。第三帧起维持既有追加语义
+        if (refs.size() == 1) {
+            const QPair<QString, double>& first = refs.first();
+            if (first.first == id && keysAdjacent(id, first.second, t)) {
+                refs.append(qMakePair(id, t));
+                selectKeys(refs);
+            } else {
+                selectKeys({ qMakePair(id, t) }); // 替换为新单选
+            }
+            return;
+        }
         refs.append(qMakePair(id, t));
         selectKeys(refs);
+    }
+
+    // ---- 双帧态派生与上报（阶段12）----
+
+    // 同对象两帧相邻判定：两帧都存在且之间无该对象其他关键帧（关键帧按 t 有序，
+    // 此处对乱序也成立——区间扫描不看顺序）
+    bool keysAdjacent(const QString& id, double ta, double tb) const
+    {
+        const ObjectData* object = m_core->findObject(id);
+        if (!object)
+            return false;
+        const double lo = qMin(ta, tb);
+        const double hi = qMax(ta, tb);
+        if (hi - lo <= 2.0 * TimelinePlayer::kTimeEpsilon)
+            return false; // 同一帧
+        bool loFound = false;
+        bool hiFound = false;
+        for (const Keyframe& key : object->keyframes) {
+            if (qAbs(key.t - lo) <= TimelinePlayer::kTimeEpsilon)
+                loFound = true;
+            else if (qAbs(key.t - hi) <= TimelinePlayer::kTimeEpsilon)
+                hiFound = true;
+            else if (key.t > lo && key.t < hi)
+                return false; // 中间有帧 → 不相邻
+        }
+        return loFound && hiFound;
+    }
+
+    // 恰好选中同一对象相邻两帧 → 段引用；否则 nullopt
+    std::optional<SegmentRef> deriveActiveSegment() const
+    {
+        if (m_sel != CanvasSel::Keys || m_selectedKeys.size() != 2)
+            return std::nullopt;
+        const QPair<QString, double>& a = m_selectedKeys.at(0);
+        const QPair<QString, double>& b = m_selectedKeys.at(1);
+        if (a.first != b.first || !keysAdjacent(a.first, a.second, b.second))
+            return std::nullopt;
+        return SegmentRef { a.first, qMin(a.second, b.second), qMax(a.second, b.second) };
+    }
+
+    // 派生并上报 EditorCore（相同值 EditorCore 侧去重不发信号）
+    void updateActiveSegment()
+    {
+        m_core->setActiveSegment(deriveActiveSegment());
     }
 
     // 命中轨道上的关键帧点（容差 7px）
@@ -1010,6 +1086,14 @@ TimelineWidget::TimelineWidget(EditorCore* editorCore, QWidget* parent)
             this, [this](double) { updateTransport(); });
     connect(player, &TimelinePlayer::playingChanged,
             this, [this](bool) { updateTransport(); });
+    // 阶段12：播放开始自动清除双帧态（不动画布关键帧选择本身）
+    connect(player, &TimelinePlayer::playingChanged, m_canvas, [this](bool playing) {
+        if (playing)
+            m_canvas->clearActiveSegment();
+    });
+    // 阶段12：新建/打开文件双帧态随文件替换清除（rebuildRows 亦有防御，此为明示路径）
+    connect(runtime, &RuntimeData::fileReplaced, m_canvas,
+            [this] { m_canvas->clearActiveSegment(); });
     connect(player, &TimelinePlayer::speedChanged, this, [this](double speed) {
         const int index = m_speedCombo->findData(speed);
         if (index >= 0)

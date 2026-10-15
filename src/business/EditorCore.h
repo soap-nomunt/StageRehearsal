@@ -30,6 +30,21 @@
 
 class RuntimeData;
 
+// 双帧段引用（阶段12，运行时状态，不入存档）：时间轴 Ctrl 加选同一对象相邻两帧
+// 进入双帧态时由 TimelineCanvas 派生上报，主视口据此绘制两帧幽灵 + 直线路径。
+// from < to（秒），帧存在性/相邻性由上报方维护（帧或相邻性消失即清除）。
+struct SegmentRef {
+    QString objectId;
+    double from = 0.0; // 前帧时刻（秒）
+    double to = 0.0;   // 后帧时刻（秒）
+};
+
+inline bool operator==(const SegmentRef& a, const SegmentRef& b)
+{
+    return a.objectId == b.objectId && a.from == b.from && a.to == b.to;
+}
+inline bool operator!=(const SegmentRef& a, const SegmentRef& b) { return !(a == b); }
+
 class EditorCore : public QObject {
     Q_OBJECT
 public:
@@ -132,9 +147,16 @@ public:
     bool removePrepArea(const QString& id);
     const PrepAreaData* findPrepArea(const QString& id) const;
 
+    // ---- 双帧段选中态（阶段12，运行时状态，不入存档）----
+    // 由 TimelineCanvas 派生上报/清除；StageScene 经 MainWindow 订阅
+    // activeSegmentChanged 绘制两帧幽灵 + 直线路径。相同值重复设置不发信号。
+    std::optional<SegmentRef> activeSegment() const { return m_activeSegment; }
+    void setActiveSegment(const std::optional<SegmentRef>& segment);
+
 signals:
     void clipboardChanged();
     void undoStackChanged(); // 入栈/撤销/重做/清空后发出，供菜单可用性刷新
+    void activeSegmentChanged(); // 双帧段选中态变化（含清除为 nullopt）
 
 private:
     QString nextFreeId(ObjectType type, QSet<QString>& taken) const; // 占用集合就地更新
@@ -151,4 +173,5 @@ private:
     QList<ObjectKeyframe> m_keyframeClipboard; // 关键帧级剪贴板（独立于对象剪贴板）
     UndoStack m_undoStack;
     int m_paletteCursor = 0;
+    std::optional<SegmentRef> m_activeSegment; // 双帧段选中态（阶段12，运行时状态）
 };
