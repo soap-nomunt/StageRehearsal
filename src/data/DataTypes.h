@@ -12,7 +12,7 @@
 
 #include <optional>
 
-inline constexpr int kFileDataVersion = 3; // v3（阶段11）：PrepAreaData 新增 color 字段；v1/v2 存档宽容迁移（准备区颜色缺省 = invalid 派生态）
+inline constexpr int kFileDataVersion = 4; // v4（阶段12）：新增 paths 节点（关键帧间移动路径）；v1/v2/v3 存档宽容迁移（无 paths = 空列表，全部直线，视觉零变化）
 
 enum class ObjectType {
     Actor,  // 演员
@@ -126,6 +126,56 @@ inline bool operator==(const PrepAreaData& a, const PrepAreaData& b)
 }
 inline bool operator!=(const PrepAreaData& a, const PrepAreaData& b) { return !(a == b); }
 
+// ---- 移动路径（阶段12，v4 新增）----
+// 路径按"段"挂接：对象 id + 相邻两帧的起止时刻（端点不存，派生自关键帧数据值）。
+// 零存储默认态：type=Line 且 points 为空的段不存在 PathData（内存亦不创建）——
+// 无 PathData 的段插值走原直线匀速路径，与 v3 及更早存档观感逐位一致。
+// 名称派生（<对象名>_<起>s至<止>s）不存储；t 参数（弧长百分比）派生不存档。
+enum class PathType {
+    Line, // 直线（途经路径点的折线）
+    Arc,  // 弧线（每段独立圆弧，圆心角见 legAngles）
+};
+
+inline QString pathTypeToString(PathType type)
+{
+    return type == PathType::Arc ? QStringLiteral("arc") : QStringLiteral("line");
+}
+
+inline PathType pathTypeFromString(const QString& str)
+{
+    return str == QLatin1String("arc") ? PathType::Arc : PathType::Line; // 非法宽容 Line
+}
+
+struct PathPoint {
+    double x = 0.0; // cm，场景绝对坐标
+    double y = 0.0;
+};
+
+inline bool operator==(const PathPoint& a, const PathPoint& b)
+{
+    return a.x == b.x && a.y == b.y;
+}
+inline bool operator!=(const PathPoint& a, const PathPoint& b) { return !(a == b); }
+
+struct PathData {
+    QString objectId;
+    double from = 0.0;         // 段起始帧时刻（秒，kTimeEpsilon 判定）
+    double to = 0.0;           // 段终止帧时刻
+    PathType type = PathType::Line;
+    QList<PathPoint> points;   // 路径点，沿行进方向有序
+    QList<double> legAngles;   // 每段圆心角（度，有符号，正 = 沿行进方向左侧鼓出）；
+                               // 长度恒 = points.size()+1（仅 Arc 有意义；±350 钳制、
+                               // |θ|<0.1° 按直线由几何层处理）
+};
+
+inline bool operator==(const PathData& a, const PathData& b)
+{
+    return a.objectId == b.objectId && a.from == b.from && a.to == b.to
+        && a.type == b.type && a.points == b.points && a.legAngles == b.legAngles;
+        // dirty 判定依赖：漏字段 = dirty 跟踪静默失效
+}
+inline bool operator!=(const PathData& a, const PathData& b) { return !(a == b); }
+
 struct SceneLabel {               // 场次标签（纯视觉标记）
     double t = 0.0;               // 秒
     QString name;
@@ -153,9 +203,11 @@ struct FileData {
     StageData stage;
     QList<ObjectData> objects;
     QList<PrepAreaData> prepAreas; // 台下准备区（v2 新增；v1 存档迁移为空列表）
+    QList<PathData> paths;         // 移动路径（v4 新增；v3 及更早存档迁移为空列表）
     TimelineData timeline;
 
-    // 新建文件默认值：舞台 1200×800cm、centerOffset=0、时间轴 60s、空对象、空准备区、空场次标签
+    // 新建文件默认值：舞台 1200×800cm、centerOffset=0、时间轴 60s、空对象、空准备区、
+    // 空路径、空场次标签
     static FileData createDefault() { return FileData{}; }
 };
 
@@ -163,6 +215,7 @@ inline bool operator==(const FileData& a, const FileData& b)
 {
     return a.version == b.version && a.stage == b.stage && a.objects == b.objects
         && a.prepAreas == b.prepAreas // dirty 内容比较依赖本字段，漏加 = dirty 跟踪静默失效
+        && a.paths == b.paths        // 同上（v4）
         && a.timeline == b.timeline;
 }
 inline bool operator!=(const FileData& a, const FileData& b) { return !(a == b); }

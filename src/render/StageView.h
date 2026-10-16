@@ -8,6 +8,9 @@
 // 朝向手柄旋转 / 方向键微调；纯右键点击（未拖动）弹 Create/复制/粘贴/删除菜单。
 // 指针反馈：悬停朝向手柄 → 旋转意图（手形），悬停对象本体 → 移动意图（四向箭头），
 // 空白 → 默认箭头；Moving/Rotating 拖拽期间保持对应指针，手势结束按悬停位置恢复。
+// 阶段12：双帧态路径编辑——点选白线（屏像素 ~5px 容差；对象优先、路径点优先于
+// 白线）设置 activePath；路径点拖拽（对象同款吸附，本地预览松开提交）/Delete
+// 删除/方向键微调；右键菜单——路径上：添加路径点/恢复直线，路径点上：删除路径点。
 
 #include <QGraphicsView>
 #include <QHash>
@@ -47,6 +50,8 @@ private:
         Rotating,  // 拖拽朝向手柄中
         MaybeBand, // 按下在空白处，待判定框选
         Banding,   // 框选中（自绘橡皮筋，中心点判定）
+        MaybePathPoint,  // 阶段12：按下在路径点上，待判定位移
+        MovingPathPoint, // 阶段12：拖拽路径点中（本地预览，松开一次性提交命令）
     };
 
     double defaultScale() const; // 1:50 换算结果（随屏幕 DPI）
@@ -58,6 +63,10 @@ private:
     // 悬停指针反馈：按 viewPos 命中结果设置指针（手柄 → 旋转意图，本体 → 移动意图，空白 → 箭头）
     void updateHoverCursor(const QPoint& viewPos);
     void showContextMenu(const QPoint& viewPos);
+    // 阶段12：双帧态路径命中（屏像素）——路径点（≤7px，返回下标，无命中 -1）
+    // 优先于白线（≤5px）；命中数据取场景当前渲染的折线/标记（同一采样实现）
+    int pathPointAtViewPos(const QPoint& viewPos) const;
+    bool pathLineAtViewPos(const QPoint& viewPos) const;
     // 打帧询问弹窗回调（需求第 20 条）：业务层只在需要询问时调用
     std::function<bool()> keyframeConfirmCallback() const;
 
@@ -86,4 +95,5 @@ private:
     QString m_rotateId;
     double m_rotateStartRotation = 0.0; // 旋转手势起点的显示角度（需求角度制）
     QRubberBand* m_rubberBand = nullptr;
+    int m_pathPointIndex = -1;          // 阶段12：拖拽中的路径点下标
 };

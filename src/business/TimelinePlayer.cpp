@@ -1,5 +1,6 @@
 #include "TimelinePlayer.h"
 
+#include "PathGeometry.h"
 #include "data/RuntimeData.h"
 
 #include <algorithm>
@@ -49,6 +50,12 @@ TimelinePlayer::TimelinePlayer(RuntimeData* runtimeData, QObject* parent)
 
 Transform TimelinePlayer::interpolate(const ObjectData& object, double t)
 {
+    return interpolate(object, {}, t); // 无路径：直线匀速（阶段12 前行为逐位一致）
+}
+
+Transform TimelinePlayer::interpolate(const ObjectData& object, const QList<PathData>& paths,
+                                      double t)
+{
     if (object.keyframes.isEmpty())
         return object.transform; // 无关键帧：静态 transform
 
@@ -75,8 +82,19 @@ Transform TimelinePlayer::interpolate(const ObjectData& object, double t)
 
     const double ratio = (t - a.t) / span;
     Transform result;
-    result.x = a.x + (b.x - a.x) * ratio; // 位置直线匀速
-    result.y = a.y + (b.y - a.y) * ratio;
+    // 位置：段内有 PathData → 复合曲线弧长匀速（t 线性 → 弧长线性）；
+    // 否则直线匀速（与阶段12 前逐位一致）
+    if (const PathData* path = PathGeometry::findPathData(paths, object.id, a.t, b.t)) {
+        const QList<QPointF> polyline =
+            PathGeometry::samplePath(*path, QPointF(a.x, a.y), QPointF(b.x, b.y));
+        const QList<double> cum = PathGeometry::cumulativeLengths(polyline);
+        const QPointF pos = PathGeometry::pointAtRatio(polyline, cum, ratio);
+        result.x = pos.x();
+        result.y = pos.y();
+    } else {
+        result.x = a.x + (b.x - a.x) * ratio; // 位置直线匀速
+        result.y = a.y + (b.y - a.y) * ratio;
+    }
     // 朝向最短弧匀速，结果归一化到 [0,360)
     result.rotation =
         normalizedDegrees(a.rotation + shortestArcDelta(a.rotation, b.rotation) * ratio);

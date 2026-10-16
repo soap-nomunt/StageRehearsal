@@ -27,6 +27,11 @@ public:
     // 插值纯函数：给定对象与时刻 T 求当前 Transform。
     // 关键帧列表按 t 有序由命令/入口维护；此处对乱序输入自行防御（排序副本）。
     static Transform interpolate(const ObjectData& object, double t);
+    // 阶段12：带路径插值——段内存在 PathData 时位置沿复合曲线弧长匀速
+    // （t 线性 → 弧长线性，采样折线化见 PathGeometry.h）；无 PathData 走原直线
+    // 路径（结果与旧签名逐位一致）。朝向与路径无关，保持最短弧匀速。
+    static Transform interpolate(const ObjectData& object, const QList<PathData>& paths,
+                                 double t);
 
     // ---- 游标 ----
     double currentTime() const { return m_currentTime; }

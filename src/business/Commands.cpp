@@ -123,15 +123,20 @@ void RemoveObjectsCommand::apply(FileData& data)
             if (cascade.contains(data.objects.at(i).id))
                 m_removed.append(qMakePair(i, data.objects.at(i)));
         }
+        m_oldPaths = data.paths; // 阶段12：路径级联删除的快照（整条列表）
         m_captured = true;
     }
+    QSet<QString> removedIds;
+    for (const auto& entry : m_removed)
+        removedIds.insert(entry.second.id);
     for (int i = data.objects.size() - 1; i >= 0; --i) {
-        for (const auto& entry : m_removed) {
-            if (data.objects.at(i).id == entry.second.id) {
-                data.objects.removeAt(i);
-                break;
-            }
-        }
+        if (removedIds.contains(data.objects.at(i).id))
+            data.objects.removeAt(i);
+    }
+    // 阶段12 级联：被删对象（含级联后代）的全部 PathData 一并删除（redo 重放幂等）
+    for (int i = data.paths.size() - 1; i >= 0; --i) {
+        if (removedIds.contains(data.paths.at(i).objectId))
+            data.paths.removeAt(i);
     }
 }
 
@@ -140,6 +145,7 @@ void RemoveObjectsCommand::revert(FileData& data)
     // m_removed 按下标升序记录，顺序插回即还原原始排列
     for (const QPair<int, ObjectData>& entry : m_removed)
         data.objects.insert(qMin(entry.first, data.objects.size()), entry.second);
+    data.paths = m_oldPaths; // 阶段12：路径级联一并还原
 }
 
 // ---- ReparentObjectsCommand ----

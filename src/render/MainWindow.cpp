@@ -51,9 +51,12 @@ MainWindow::MainWindow(QWidget* parent)
             this, &MainWindow::updateWindowTitle);
     connect(m_runtimeData, &RuntimeData::fileDataChanged,
             this, &MainWindow::updateWindowTitle);
-    // 阶段12：双帧段选中态 → 主视口幽灵/白线可视化
+    // 阶段12：双帧段选中态 → 主视口幽灵/路径可视化；选中路径 → 路径点标记
     connect(m_editorCore, &EditorCore::activeSegmentChanged, m_scene, [this] {
         m_scene->setActiveSegment(m_editorCore->activeSegment());
+    });
+    connect(m_editorCore, &EditorCore::activePathChanged, m_scene, [this] {
+        m_scene->setActivePath(m_editorCore->activePath());
     });
 
     // 阶段8：构造函数不再加载任何文件（构造即默认空舞台，无文件 IO）；
@@ -326,11 +329,21 @@ void MainWindow::setupMenus()
     connect(m_copyAction, &QAction::triggered, m_editorCore, &EditorCore::copySelection);
     connect(m_pasteAction, &QAction::triggered,
             m_editorCore, [this] { m_editorCore->pasteClipboard(); }); // 默认偏移 (x+20, y+20)
-    connect(m_deleteAction, &QAction::triggered, m_editorCore, &EditorCore::deleteSelection);
+    connect(m_deleteAction, &QAction::triggered, m_editorCore, [this] {
+        // 阶段12：选中路径点时 Delete 作用于路径点（对象语义让步）；否则对象删除
+        if (const auto& path = m_editorCore->activePath(); path && path->pointIndex >= 0) {
+            m_editorCore->removePathPoint(path->segment.objectId, path->segment.from,
+                                          path->segment.to, path->pointIndex);
+            return;
+        }
+        m_editorCore->deleteSelection();
+    });
     connect(m_editorCore->selection(), &SelectionModel::selectionChanged,
             this, &MainWindow::updateEditActions);
     connect(m_editorCore, &EditorCore::clipboardChanged,
             this, &MainWindow::updateEditActions);
+    connect(m_editorCore, &EditorCore::activePathChanged,
+            this, &MainWindow::updateEditActions); // 阶段12：路径点选中也使能删除
     updateEditActions();
 
     // 设置（阶段7 合并入口）：舞台设置与偏好设置已并入同一个统一设置窗口
@@ -354,8 +367,11 @@ void MainWindow::updateEditActions()
     m_undoAction->setEnabled(m_editorCore->canUndo());
     m_redoAction->setEnabled(m_editorCore->canRedo());
     const bool hasSelection = !m_editorCore->selection()->isEmpty();
+    // 阶段12：选中路径点时删除/可用（作用于路径点）
+    const auto& activePath = m_editorCore->activePath();
+    const bool hasPathPoint = activePath && activePath->pointIndex >= 0;
     m_copyAction->setEnabled(hasSelection);
-    m_deleteAction->setEnabled(hasSelection);
+    m_deleteAction->setEnabled(hasSelection || hasPathPoint);
     m_pasteAction->setEnabled(m_editorCore->clipboardHasContent());
 }
 

@@ -5,15 +5,26 @@
 // fileDataChanged → 场景重建体现）；多选或无选中时清空表单；重名拒绝并提示。
 // 阶段5：位置/朝向字段显示 TimelinePlayer 当前时刻插值结果（显示值与数据值分离，
 // 游标移动随 currentTimeChanged 刷新）；提交走需求第 20 条打帧流程。
+// 阶段12：路径页（第五页）——双帧态点选白线进入（EditorCore::activePath 非空
+// 优先于对象表单）：名称（派生只读 <对象名>_<起>s至<止>s）、连线类型下拉、
+// 圆心角行（无路径点 1 行 / 有路径点 N+1 行，结构不变不重建防输入抖动）、
+// 选中路径点 t 行（弧长百分比）、只读段时长/弧长显示；一切提交走命令入撤销栈。
 
 #include <QWidget>
 
+#include <QList>
+#include <QString>
+
+#include "business/EditorCore.h" // SegmentRef
+
 class EditorCore;
+class QComboBox;
 class QDoubleSpinBox;
 class QLabel;
 class QLineEdit;
 class QPushButton;
 class QStackedWidget;
+class QVBoxLayout;
 struct ObjectData;
 
 class InspectorPanel : public QWidget {
@@ -27,6 +38,12 @@ private:
     void commitTransform();  // 位置/朝向数值框提交
     void commitSize();       // 屏风大小
     void pickColor();        // 色块按钮 + QColorDialog
+
+    // ---- 阶段12：路径页 ----
+    void refreshPathPage();  // 按 activePath 回显（名称/类型/圆心角行/t/段时长弧长）
+    void rebuildPathAngleRows(int legCount); // 结构变化才重建圆心角行（防输入抖动）
+    void commitPathType(int index);          // 连线下拉：直线/弧线
+    void commitPathPointT();                 // 选中路径点 t 提交（滑动重定位）
 
     const ObjectData* currentObject() const; // 当前单选对象，否则空
     void updateColorButton(QPushButton* button, const QColor& color) const;
@@ -54,6 +71,20 @@ private:
 
     // 空对象表单（纯组织节点：只有名称）
     QLineEdit* m_groupName = nullptr;
+
+    // 路径页（阶段12）
+    QWidget* m_pathPage = nullptr;
+    QLineEdit* m_pathName = nullptr;          // pathNameEdit（派生只读）
+    QComboBox* m_pathType = nullptr;          // pathTypeCombo（直线/弧线）
+    QList<QLabel*> m_pathAngleLabels;         // 圆心角行标签（结构重建时换）
+    QList<QDoubleSpinBox*> m_pathAngleSpins;  // pathLegAngleSpin%1（逐段）
+    QWidget* m_pathPointTRow = nullptr;       // 选中路径点 t 行（无选中点隐藏）
+    QDoubleSpinBox* m_pathPointT = nullptr;   // pathPointTSpin（弧长百分比 0~1）
+    QLabel* m_pathMetrics = nullptr;          // pathMetricsLabel（段时长/弧长只读）
+    QVBoxLayout* m_pathAnglesLayout = nullptr; // 圆心角行容器（结构重建时清空重排）
+    SegmentRef m_pathAngleSegment;            // 圆心角行结构对应的段（变了才重建）
+    bool m_pathAngleSegmentValid = false;
+    int m_pathAngleLegCount = -1;
 
     bool m_updating = false; // 刷新表单期间屏蔽提交槽，防信号回环
 };

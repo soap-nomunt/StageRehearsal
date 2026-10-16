@@ -63,6 +63,28 @@ QJsonObject prepAreaToJson(const PrepAreaData& p)
     return obj;
 }
 
+QJsonObject pathToJson(const PathData& p)
+{
+    QJsonObject obj;
+    obj[QStringLiteral("object")] = p.objectId;
+    obj[QStringLiteral("from")] = p.from;
+    obj[QStringLiteral("to")] = p.to;
+    obj[QStringLiteral("type")] = pathTypeToString(p.type);
+    QJsonArray points;
+    for (const PathPoint& point : p.points) {
+        QJsonObject pointObj;
+        pointObj[QStringLiteral("x")] = point.x;
+        pointObj[QStringLiteral("y")] = point.y;
+        points.append(pointObj);
+    }
+    obj[QStringLiteral("points")] = points;
+    QJsonArray legAngles;
+    for (double angle : p.legAngles)
+        legAngles.append(angle);
+    obj[QStringLiteral("legAngles")] = legAngles;
+    return obj;
+}
+
 // ---- 解析辅助（全部先查类型再取值，任何畸形输入都不崩溃） ----
 
 LoadResult invalid(const QString& message)
@@ -238,6 +260,59 @@ bool parsePrepArea(const QJsonValue& value, PrepAreaData& out, QString& error)
     return true;
 }
 
+// 移动路径（v4 新增）：节点缺失宽容为空列表（v3 及更早迁移）；type 非法宽容 Line；
+// legAngles 长度不符宽容补 0/截断（长度恒 = points.size()+1）
+bool parsePathData(const QJsonValue& value, PathData& out, QString& error)
+{
+    if (!value.isObject()) {
+        error = QStringLiteral("paths 数组元素不是对象");
+        return false;
+    }
+    const QJsonObject obj = value.toObject();
+    if (!readString(obj, QStringLiteral("object"), out.objectId)
+        || !readDouble(obj, QStringLiteral("from"), out.from)
+        || !readDouble(obj, QStringLiteral("to"), out.to)) {
+        error = QStringLiteral("路径缺少 object/from/to 字段");
+        return false;
+    }
+    if (out.objectId.isEmpty()) {
+        error = QStringLiteral("路径 object 不能为空");
+        return false;
+    }
+    const QJsonValue typeValue = obj.value(QStringLiteral("type"));
+    if (typeValue.isString())
+        out.type = pathTypeFromString(typeValue.toString()); // 非法宽容 Line
+
+    const QJsonValue pointsValue = obj.value(QStringLiteral("points"));
+    if (pointsValue.isArray()) {
+        for (const QJsonValue& pointValue : pointsValue.toArray()) {
+            if (!pointValue.isObject())
+                continue; // 畸形点宽容跳过
+            const QJsonObject pointObj = pointValue.toObject();
+            PathPoint point;
+            if (readDouble(pointObj, QStringLiteral("x"), point.x)
+                && readDouble(pointObj, QStringLiteral("y"), point.y))
+                out.points.append(point);
+        }
+    }
+
+    QList<double> angles;
+    const QJsonValue anglesValue = obj.value(QStringLiteral("legAngles"));
+    if (anglesValue.isArray()) {
+        for (const QJsonValue& angleValue : anglesValue.toArray()) {
+            if (angleValue.isDouble())
+                angles.append(angleValue.toDouble());
+        }
+    }
+    // 长度不变式：补 0 / 截断到 points.size()+1
+    while (angles.size() < out.points.size() + 1)
+        angles.append(0.0);
+    while (angles.size() > out.points.size() + 1)
+        angles.removeLast();
+    out.legAngles = angles;
+    return true;
+}
+
 } // namespace
 
 QJsonObject JsonStore::toJson(const FileData& data)
@@ -261,6 +336,12 @@ QJsonObject JsonStore::toJson(const FileData& data)
     for (const PrepAreaData& p : data.prepAreas)
         prepAreas.append(prepAreaToJson(p));
     root[QStringLiteral("prepAreas")] = prepAreas;
+
+    // v4 起恒写（空列表也写空数组）：关键帧间移动路径
+    QJsonArray paths;
+    for (const PathData& p : data.paths)
+        paths.append(pathToJson(p));
+    root[QStringLiteral("paths")] = paths;
 
     QJsonObject timeline;
     timeline[QStringLiteral("duration")] = data.timeline.duration;
@@ -327,6 +408,21 @@ LoadResult JsonStore::fromJson(const QJsonObject& root)
             if (!parsePrepArea(entry, area, error))
                 return invalid(error);
             data.prepAreas.append(area);
+        }
+    }
+
+    // paths（v4 新增）：节点缺失宽容为空列表（v3 及更早存档迁移）；
+    // 存在则必须是数组（同 prepAreas 先例）
+    const QJsonValue pathsValue = root.value(QStringLiteral("paths"));
+    if (!pathsValue.isUndefined()) {
+        if (!pathsValue.isArray())
+            return invalid(QStringLiteral("paths 不是数组"));
+        for (const QJsonValue& entry : pathsValue.toArray()) {
+            PathData path;
+            QString error;
+            if (!parsePathData(entry, path, error))
+                return invalid(error);
+            data.paths.append(path);
         }
     }
 

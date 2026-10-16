@@ -35,6 +35,8 @@ struct ObjectKeyframeRef {
 // 打帧/更新（upsert）：T 处已有关键帧（|Δt| <= kTimeEpsilon）→ 更新其值；
 // 否则插入并保持按 t 有序。一次拖拽/一次打帧按钮可能涉及多个对象，
 // 批量合并为一条命令 = 一步撤销。
+// 阶段12 级联：插入新帧（非更新）落进某段区间内部 → 该段被劈开，其 PathData
+// 静默丢弃（同命令快照 paths，撤销/重做严格互逆）；更新既有帧（端点编辑）不动路径。
 class UpsertKeyframesCommand : public Command {
 public:
     explicit UpsertKeyframesCommand(QList<ObjectKeyframe> items);
@@ -45,11 +47,13 @@ public:
 private:
     QList<ObjectKeyframe> m_items;
     QList<QPair<QString, QList<Keyframe>>> m_oldKeyframes; // (对象 id, 旧列表)
+    QList<PathData> m_oldPaths; // 阶段12：级联丢弃的路径快照（整条列表）
     double m_oldDuration = 0.0;
     bool m_captured = false;
 };
 
 // 删除关键帧：按 (id, t) 批量。不收缩时长（时长只自动延长）。
+// 阶段12 级联：被删帧作为端点的相邻两段（from≈t 或 to≈t）PathData 一并丢弃。
 class RemoveKeyframesCommand : public Command {
 public:
     explicit RemoveKeyframesCommand(QList<ObjectKeyframeRef> refs);
@@ -60,11 +64,13 @@ public:
 private:
     QList<ObjectKeyframeRef> m_refs;
     QList<QPair<QString, QList<Keyframe>>> m_oldKeyframes;
+    QList<PathData> m_oldPaths; // 阶段12
     bool m_captured = false;
 };
 
 // 拖动关键帧改时刻：t 变化、值不变；目标时刻已有帧则被覆盖（upsert 语义，
 // 捕获的旧列表保证 revert 还原双方）。
+// 阶段12 级联：段标识跟随重绑定——该对象路径的 from/to ≈ oldT 者改为 newT。
 class MoveKeyframeCommand : public Command {
 public:
     MoveKeyframeCommand(QString id, double oldT, double newT);
@@ -77,6 +83,7 @@ private:
     double m_oldT;
     double m_newT;
     QList<Keyframe> m_oldKeyframes;
+    QList<PathData> m_oldPaths; // 阶段12
     double m_oldDuration = 0.0;
     bool m_captured = false;
 };
@@ -85,6 +92,7 @@ private:
 // 逐帧 clamp t≥0；同对象目标时刻已有帧按 upsert 覆盖（捕获的旧列表保证 revert
 // 还原双方）；同批两帧钳到同一时刻时按列表顺序后者覆盖前者（逐帧顺序处理的
 // 自然结果）；时长自动延长沿用。
+// 阶段12 级联：同 MoveKeyframeCommand，逐条重绑定 from/to（≈ 旧时刻 → 钳后新时刻）。
 class MoveKeyframesCommand : public Command {
 public:
     MoveKeyframesCommand(QList<ObjectKeyframeRef> refs, double deltaT);
@@ -96,6 +104,7 @@ private:
     QList<ObjectKeyframeRef> m_refs;
     double m_deltaT;
     QList<QPair<QString, QList<Keyframe>>> m_oldKeyframes; // (对象 id, 旧列表)
+    QList<PathData> m_oldPaths; // 阶段12
     double m_oldDuration = 0.0;
     bool m_captured = false;
 };

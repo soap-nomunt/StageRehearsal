@@ -2,13 +2,17 @@
 
 #include "KeyframePrompt.h"
 #include "business/EditorCore.h"
+#include "business/PathCommands.h" // resolveSegmentEndpoints
+#include "business/PathGeometry.h"
 #include "business/SelectionModel.h"
 #include "business/TimelinePlayer.h"
 #include "data/RuntimeData.h"
 
 #include <QColorDialog>
+#include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -124,6 +128,75 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
     groupForm->addRow(QStringLiteral("名称"), m_groupName);
     m_stack->addWidget(groupPage);
 
+    // ---- 路径页（阶段12）：名称（派生只读）+ 连线类型 + 圆心角行 + 路径点 t +
+    // 只读段时长/弧长；一切提交走命令入撤销栈 ----
+    m_pathPage = new QWidget(this);
+    {
+        auto* pathLayout = new QVBoxLayout(m_pathPage);
+        pathLayout->setContentsMargins(4, 4, 4, 4);
+        pathLayout->setSpacing(4);
+        // 行 = 标题小字 + 控件（与既有表单的紧凑风格一致）
+        const auto addRow = [this, pathLayout](const QString& title, QWidget* control) {
+            auto* row = new QWidget(m_pathPage);
+            auto* rowLayout = new QVBoxLayout(row);
+            rowLayout->setContentsMargins(0, 2, 0, 2);
+            rowLayout->setSpacing(2);
+            auto* label = new QLabel(title, row);
+            label->setStyleSheet(QStringLiteral("color: #888888;"));
+            rowLayout->addWidget(label);
+            rowLayout->addWidget(control);
+            pathLayout->addWidget(row);
+        };
+
+        m_pathName = new QLineEdit(m_pathPage);
+        m_pathName->setObjectName(QStringLiteral("pathNameEdit"));
+        m_pathName->setReadOnly(true); // 名称派生自段标识，不可修改
+        addRow(QStringLiteral("名称"), m_pathName);
+
+        m_pathType = new QComboBox(m_pathPage);
+        m_pathType->setObjectName(QStringLiteral("pathTypeCombo"));
+        m_pathType->addItem(QStringLiteral("直线"));
+        m_pathType->addItem(QStringLiteral("弧线"));
+        addRow(QStringLiteral("连线类型"), m_pathType);
+
+        // 圆心角行：动态生成（无路径点 1 行 / 有路径点 N+1 行），仅弧线可编辑
+        auto* anglesCaption = new QLabel(QStringLiteral("圆心角（度，正 = 沿行进方向左侧鼓出）"),
+                                         m_pathPage);
+        anglesCaption->setStyleSheet(QStringLiteral("color: #888888;"));
+        pathLayout->addWidget(anglesCaption);
+        auto* anglesContainer = new QWidget(m_pathPage);
+        m_pathAnglesLayout = new QVBoxLayout(anglesContainer);
+        m_pathAnglesLayout->setContentsMargins(0, 0, 0, 0);
+        m_pathAnglesLayout->setSpacing(2);
+        pathLayout->addWidget(anglesContainer);
+
+        // 选中路径点 t（沿路径弧长百分比）：无选中点时整行隐藏
+        m_pathPointT = new QDoubleSpinBox(m_pathPage);
+        m_pathPointT->setObjectName(QStringLiteral("pathPointTSpin"));
+        m_pathPointT->setRange(0.0, 1.0);
+        m_pathPointT->setDecimals(3);
+        m_pathPointT->setSingleStep(0.05);
+        m_pathPointT->setKeyboardTracking(false); // 输入回车/失焦才提交
+        m_pathPointTRow = new QWidget(m_pathPage);
+        {
+            auto* rowLayout = new QVBoxLayout(m_pathPointTRow);
+            rowLayout->setContentsMargins(0, 2, 0, 2);
+            rowLayout->setSpacing(2);
+            auto* label = new QLabel(QStringLiteral("路径点 t（弧长百分比）"), m_pathPointTRow);
+            label->setStyleSheet(QStringLiteral("color: #888888;"));
+            rowLayout->addWidget(label);
+            rowLayout->addWidget(m_pathPointT);
+        }
+        pathLayout->addWidget(m_pathPointTRow);
+
+        m_pathMetrics = new QLabel(m_pathPage);
+        m_pathMetrics->setObjectName(QStringLiteral("pathMetricsLabel"));
+        m_pathMetrics->setStyleSheet(QStringLiteral("color: #888888;"));
+        pathLayout->addWidget(m_pathMetrics);
+        pathLayout->addStretch();
+    }
+    m_stack->addWidget(m_pathPage); // 第五页（index 4）
+
     // 修改立即生效：提交即走命令
     connect(m_actorName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
     connect(m_screenName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
@@ -136,10 +209,19 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
     connect(m_screenH, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitSize);
     connect(m_actorColor, &QPushButton::clicked, this, &InspectorPanel::pickColor);
     connect(m_screenColor, &QPushButton::clicked, this, &InspectorPanel::pickColor);
+    // 阶段12：路径页提交（一切走命令入撤销栈；currentIndexChanged 同 spin 的
+    // valueChanged 模式：程序回显走 m_updating 屏蔽，用户切换才提交）
+    connect(m_pathType, &QComboBox::currentIndexChanged,
+            this, &InspectorPanel::commitPathType);
+    connect(m_pathPointT, &QDoubleSpinBox::valueChanged,
+            this, &InspectorPanel::commitPathPointT);
 
     connect(m_editorCore->selection(), &SelectionModel::selectionChanged,
             this, &InspectorPanel::refresh);
     connect(m_editorCore->runtimeData(), &RuntimeData::fileDataChanged,
+            this, &InspectorPanel::refresh);
+    // 阶段12：选中路径变化 → 切路径页/回对象页
+    connect(m_editorCore, &EditorCore::activePathChanged,
             this, &InspectorPanel::refresh);
     // 游标移动/播放 tick 后，位置/朝向字段跟随当前时刻插值结果刷新
     connect(m_editorCore->timelinePlayer(), &TimelinePlayer::currentTimeChanged,
@@ -160,6 +242,15 @@ void InspectorPanel::refresh()
         return;
     m_updating = true;
 
+    // 阶段12：选中路径优先于对象表单（点选白线 → 路径页）
+    if (m_editorCore->activePath()) {
+        refreshPathPage();
+        m_stack->setCurrentWidget(m_pathPage);
+        m_updating = false;
+        return;
+    }
+    m_pathAngleSegmentValid = false; // 离开路径页：圆心角行结构缓存失效
+
     const ObjectData* object = currentObject();
     if (!object) {
         // 多选或无选中：清空表单
@@ -177,9 +268,10 @@ void InspectorPanel::refresh()
         m_groupName->setText(object->name);
         m_stack->setCurrentIndex(3);
     } else if (object->type == ObjectType::Screen) {
-        // 位置/朝向显示当前时刻插值结果（显示值与数据值分离）
+        // 位置/朝向显示当前时刻插值结果（显示值与数据值分离；阶段12 起含路径）
         const Transform shown =
-            TimelinePlayer::interpolate(*object, m_editorCore->timelinePlayer()->currentTime());
+            TimelinePlayer::interpolate(*object, m_editorCore->runtimeData()->fileData().paths,
+                                        m_editorCore->timelinePlayer()->currentTime());
         m_screenName->setText(object->name);
         m_screenX->setValue(shown.x);
         m_screenY->setValue(shown.y);
@@ -190,7 +282,8 @@ void InspectorPanel::refresh()
         m_stack->setCurrentIndex(2);
     } else {
         const Transform shown =
-            TimelinePlayer::interpolate(*object, m_editorCore->timelinePlayer()->currentTime());
+            TimelinePlayer::interpolate(*object, m_editorCore->runtimeData()->fileData().paths,
+                                        m_editorCore->timelinePlayer()->currentTime());
         m_actorName->setText(object->name);
         m_actorX->setValue(shown.x);
         m_actorY->setValue(shown.y);
@@ -277,4 +370,134 @@ void InspectorPanel::updateColorButton(QPushButton* button, const QColor& color)
 {
     button->setStyleSheet(QStringLiteral("background-color: %1; border: 1px solid #202020;")
                               .arg(color.isValid() ? color.name() : QStringLiteral("#808080")));
+}
+
+// ---- 阶段12：路径页 ----
+
+void InspectorPanel::refreshPathPage()
+{
+    const auto& activePath = *m_editorCore->activePath();
+    const SegmentRef& segment = activePath.segment;
+    const ObjectData* object = m_editorCore->findObject(segment.objectId);
+    if (!object)
+        return; // 防御（pruneActivePath 会清除失效路径）
+    const PathData* path =
+        m_editorCore->findPath(segment.objectId, segment.from, segment.to);
+    const PathType type = path ? path->type : PathType::Line;
+    const int pointCount = path ? path->points.size() : 0;
+
+    // 名称派生只读：<对象名>_<起>s至<止>s
+    m_pathName->setText(QStringLiteral("%1_%2s至%3s")
+                            .arg(object->name, QString::number(segment.from),
+                                 QString::number(segment.to)));
+    m_pathType->setCurrentIndex(type == PathType::Arc ? 1 : 0);
+
+    // 圆心角行：结构（段/行数）不变只刷新值，避免输入中重建抖动
+    rebuildPathAngleRows(pointCount + 1);
+    for (int i = 0; i < m_pathAngleSpins.size(); ++i) {
+        m_pathAngleSpins.at(i)->setEnabled(type == PathType::Arc);
+        m_pathAngleSpins.at(i)->setValue(
+            path && i < path->legAngles.size() ? path->legAngles.at(i) : 0.0);
+    }
+
+    // 端点（两帧数据值）与当前复合曲线：段时长/弧长只读显示、选中点 t 回显
+    QPointF fromPos;
+    QPointF toPos;
+    if (resolveSegmentEndpoints(m_editorCore->runtimeData()->fileData(), segment.objectId,
+                                segment.from, segment.to, fromPos, toPos)) {
+        const QList<QPointF> polyline = path
+            ? PathGeometry::samplePath(*path, fromPos, toPos)
+            : QList<QPointF> { fromPos, toPos };
+        m_pathMetrics->setText(QStringLiteral("段时长 %1 s，路径弧长 %2 cm")
+                                   .arg(segment.to - segment.from, 0, 'f', 1)
+                                   .arg(PathGeometry::totalLength(polyline), 0, 'f', 1));
+        if (activePath.pointIndex >= 0 && activePath.pointIndex < pointCount) {
+            const PathPoint& point = path->points.at(activePath.pointIndex);
+            m_pathPointT->setValue(PathGeometry::projectToRatio(
+                polyline, QPointF(point.x, point.y))); // 拖拽后回显投影弧长百分比
+            m_pathPointTRow->setVisible(true);
+        } else {
+            m_pathPointTRow->setVisible(false);
+        }
+    } else {
+        m_pathMetrics->clear();
+        m_pathPointTRow->setVisible(false);
+    }
+}
+
+void InspectorPanel::rebuildPathAngleRows(int legCount)
+{
+    const auto& segment = m_editorCore->activePath()->segment;
+    if (m_pathAngleSegmentValid && m_pathAngleSegment == segment
+        && m_pathAngleLegCount == legCount)
+        return; // 结构未变：只刷新值（refreshPathPage 负责）
+    m_pathAngleSegment = segment;
+    m_pathAngleSegmentValid = true;
+    m_pathAngleLegCount = legCount;
+
+    // 清空旧行
+    m_pathAngleLabels.clear();
+    m_pathAngleSpins.clear();
+    while (QLayoutItem* item = m_pathAnglesLayout->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+
+    // 段端点名：起点 / P1…PN / 终点
+    const auto pointName = [legCount](int index) {
+        if (index == 0)
+            return QStringLiteral("起点");
+        if (index >= legCount)
+            return QStringLiteral("终点");
+        return QStringLiteral("P%1").arg(index);
+    };
+    for (int i = 0; i < legCount; ++i) {
+        auto* row = new QWidget(m_pathAnglesLayout->parentWidget());
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(0, 0, 0, 0);
+        auto* label = new QLabel(
+            QStringLiteral("段%1 %2→%3").arg(i + 1).arg(pointName(i), pointName(i + 1)),
+            row);
+        auto* spin = new QDoubleSpinBox(row);
+        spin->setObjectName(QStringLiteral("pathLegAngleSpin%1").arg(i));
+        spin->setRange(-PathGeometry::kMaxLegAngleDeg, PathGeometry::kMaxLegAngleDeg);
+        spin->setDecimals(1);
+        spin->setSingleStep(5.0);
+        spin->setSuffix(QStringLiteral(" °"));
+        spin->setKeyboardTracking(false);
+        rowLayout->addWidget(label);
+        rowLayout->addWidget(spin);
+        m_pathAnglesLayout->addWidget(row);
+        m_pathAngleLabels.append(label);
+        m_pathAngleSpins.append(spin);
+        connect(spin, &QDoubleSpinBox::valueChanged, this, [this, i](double value) {
+            if (m_updating)
+                return;
+            const auto& activePath = *m_editorCore->activePath();
+            m_editorCore->setPathLegAngle(activePath.segment.objectId,
+                                          activePath.segment.from, activePath.segment.to,
+                                          i, value);
+        });
+    }
+}
+
+void InspectorPanel::commitPathType(int index)
+{
+    if (m_updating || !m_editorCore->activePath())
+        return;
+    const auto& segment = m_editorCore->activePath()->segment;
+    m_editorCore->setPathType(segment.objectId, segment.from, segment.to,
+                              index == 1 ? PathType::Arc : PathType::Line);
+}
+
+void InspectorPanel::commitPathPointT()
+{
+    if (m_updating || !m_editorCore->activePath())
+        return;
+    const auto& activePath = *m_editorCore->activePath();
+    if (activePath.pointIndex < 0)
+        return;
+    m_editorCore->setPathPointT(activePath.segment.objectId, activePath.segment.from,
+                                activePath.segment.to, activePath.pointIndex,
+                                m_pathPointT->value());
 }

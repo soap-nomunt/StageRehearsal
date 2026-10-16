@@ -45,6 +45,20 @@ inline bool operator==(const SegmentRef& a, const SegmentRef& b)
 }
 inline bool operator!=(const SegmentRef& a, const SegmentRef& b) { return !(a == b); }
 
+// 选中路径引用（阶段12 方案A，运行时状态，不入存档）：点选白线设置，
+// Inspector 据此切路径页。segment 要求等于当前 activeSegment（白线只在双帧态
+// 显示）；pointIndex = 选中路径点下标（-1 = 仅路径选中，无选中点）。
+struct ActivePathRef {
+    SegmentRef segment;
+    int pointIndex = -1;
+};
+
+inline bool operator==(const ActivePathRef& a, const ActivePathRef& b)
+{
+    return a.segment == b.segment && a.pointIndex == b.pointIndex;
+}
+inline bool operator!=(const ActivePathRef& a, const ActivePathRef& b) { return !(a == b); }
+
 class EditorCore : public QObject {
     Q_OBJECT
 public:
@@ -150,13 +164,35 @@ public:
     // ---- 双帧段选中态（阶段12，运行时状态，不入存档）----
     // 由 TimelineCanvas 派生上报/清除；StageScene 经 MainWindow 订阅
     // activeSegmentChanged 绘制两帧幽灵 + 直线路径。相同值重复设置不发信号。
+    // 段消失/变更时一并清除 activePath。
     std::optional<SegmentRef> activeSegment() const { return m_activeSegment; }
     void setActiveSegment(const std::optional<SegmentRef>& segment);
+
+    // ---- 选中路径（阶段12 方案A，运行时状态，不入存档）----
+    // 主视口点选白线设置（pointIndex 可另选路径点）；Inspector 订阅切路径页。
+    // 对象选中变化 / 双帧态消失 / 命令提交后路径数据失效 → 清除。
+    std::optional<ActivePathRef> activePath() const { return m_activePath; }
+    void setActivePath(const std::optional<ActivePathRef>& path);
+
+    // ---- 移动路径（阶段12，全部走命令入撤销栈；级联见关键帧/对象命令）----
+    const PathData* findPath(const QString& objectId, double from, double to) const;
+    bool setPathType(const QString& objectId, double from, double to, PathType type);
+    bool setPathLegAngle(const QString& objectId, double from, double to, int legIndex,
+                         double angleDeg); // ±350° 钳制
+    bool addPathPoint(const QString& objectId, double from, double to,
+                      const QPointF& scenePos); // 点吸附到曲线点击处，圆心角保形拆分
+    bool movePathPoint(const QString& objectId, double from, double to, int pointIndex,
+                       const QPointF& scenePos);
+    bool removePathPoint(const QString& objectId, double from, double to, int pointIndex);
+    bool setPathPointT(const QString& objectId, double from, double to, int pointIndex,
+                       double t); // 沿曲线滑动重定位 + 相邻钳制保序
+    bool resetPath(const QString& objectId, double from, double to); // 恢复直线
 
 signals:
     void clipboardChanged();
     void undoStackChanged(); // 入栈/撤销/重做/清空后发出，供菜单可用性刷新
     void activeSegmentChanged(); // 双帧段选中态变化（含清除为 nullopt）
+    void activePathChanged();    // 选中路径变化（含清除为 nullopt）
 
 private:
     QString nextFreeId(ObjectType type, QSet<QString>& taken) const; // 占用集合就地更新
@@ -165,6 +201,7 @@ private:
     QString uniqueName(const QString& base, QSet<QString>& takenNames) const; // 粘贴用：重名则数字后缀
     QColor nextPaletteColor();                                       // 调色板轮转
     void pruneSelection();                                           // 剔除已不存在的选中 id
+    void pruneActivePath(); // 剔除失效的选中路径（段/路径点不存在即清除，fileDataChanged）
 
     RuntimeData* m_runtimeData = nullptr; // 不拥有
     TimelinePlayer m_timelinePlayer;      // 游标/插值/播放（运行时状态，不入存档）
@@ -174,4 +211,5 @@ private:
     UndoStack m_undoStack;
     int m_paletteCursor = 0;
     std::optional<SegmentRef> m_activeSegment; // 双帧段选中态（阶段12，运行时状态）
+    std::optional<ActivePathRef> m_activePath; // 选中路径（阶段12，运行时状态）
 };

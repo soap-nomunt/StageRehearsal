@@ -35,6 +35,9 @@ qt_add_executable(StageRehearsal
     src/business/TimelinePlayer.cpp
     src/business/KeyframeCommands.h
     src/business/KeyframeCommands.cpp
+    src/business/PathGeometry.h
+    src/business/PathCommands.h
+    src/business/PathCommands.cpp
     src/render/MainWindow.h
     src/render/MainWindow.cpp
     src/render/RenderUtil.h
@@ -92,6 +95,7 @@ add_executable(DataLayerSelfTest
     src/business/SelectionModel.cpp
     src/business/TimelinePlayer.cpp
     src/business/KeyframeCommands.cpp
+    src/business/PathCommands.cpp
 )
 
 target_include_directories(DataLayerSelfTest PRIVATE src)
@@ -111,6 +115,7 @@ add_executable(InteractionSelfTest
     src/business/SelectionModel.cpp
     src/business/TimelinePlayer.cpp
     src/business/KeyframeCommands.cpp
+    src/business/PathCommands.cpp
     src/render/MainWindow.cpp
     src/render/StageScene.cpp
     src/render/StageView.cpp

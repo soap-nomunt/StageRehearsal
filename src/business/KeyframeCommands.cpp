@@ -48,6 +48,45 @@ void ensureDuration(FileData& data, double t)
         data.timeline.duration = t;
 }
 
+// ---- 阶段12：路径级联（与关键帧改动同命令快照，撤销/重做严格互逆）----
+
+// 段内打帧（插入新帧，非更新端点）→ 段被劈开，该段 PathData 静默丢弃
+void dropPathsContaining(FileData& data, const QString& objectId, double t)
+{
+    for (int i = data.paths.size() - 1; i >= 0; --i) {
+        const PathData& path = data.paths.at(i);
+        if (path.objectId == objectId
+            && path.from + TimelinePlayer::kTimeEpsilon < t
+            && t < path.to - TimelinePlayer::kTimeEpsilon)
+            data.paths.removeAt(i);
+    }
+}
+
+// 删除端点帧 → 相邻两段（from≈t 或 to≈t）PathData 丢弃
+void dropPathsAtEndpoint(FileData& data, const QString& objectId, double t)
+{
+    for (int i = data.paths.size() - 1; i >= 0; --i) {
+        const PathData& path = data.paths.at(i);
+        if (path.objectId == objectId
+            && (qAbs(path.from - t) <= TimelinePlayer::kTimeEpsilon
+                || qAbs(path.to - t) <= TimelinePlayer::kTimeEpsilon))
+            data.paths.removeAt(i);
+    }
+}
+
+// 帧改时刻 → 段标识跟随重绑定（from/to ≈ oldT 者改为 newT）
+void rebindPaths(FileData& data, const QString& objectId, double oldT, double newT)
+{
+    for (PathData& path : data.paths) {
+        if (path.objectId != objectId)
+            continue;
+        if (qAbs(path.from - oldT) <= TimelinePlayer::kTimeEpsilon)
+            path.from = newT;
+        if (qAbs(path.to - oldT) <= TimelinePlayer::kTimeEpsilon)
+            path.to = newT;
+    }
+}
+
 } // namespace
 
 // ---- UpsertKeyframesCommand ----
@@ -72,11 +111,18 @@ void UpsertKeyframesCommand::apply(FileData& data)
             }
         }
         m_oldDuration = data.timeline.duration;
+        m_oldPaths = data.paths;
         m_captured = true;
     }
     for (const ObjectKeyframe& item : m_items) {
-        if (ObjectData* object = findObject(data, item.id))
+        if (ObjectData* object = findObject(data, item.id)) {
+            // 阶段12 级联：插入新帧（非更新端点帧）落进某段内部 → 该段路径丢弃
+            const bool isInsert =
+                keyframeIndexAt(object->keyframes, item.keyframe.t) < 0;
+            if (isInsert)
+                dropPathsContaining(data, item.id, item.keyframe.t);
             upsertKeyframe(object->keyframes, item.keyframe);
+        }
         ensureDuration(data, item.keyframe.t);
     }
 }
@@ -88,6 +134,7 @@ void UpsertKeyframesCommand::revert(FileData& data)
             object->keyframes = entry.second;
     }
     data.timeline.duration = m_oldDuration;
+    data.paths = m_oldPaths;
 }
 
 // ---- RemoveKeyframesCommand ----
@@ -110,6 +157,7 @@ void RemoveKeyframesCommand::apply(FileData& data)
                     qMakePair(ref.id, object ? object->keyframes : QList<Keyframe>()));
             }
         }
+        m_oldPaths = data.paths;
         m_captured = true;
     }
     for (const ObjectKeyframeRef& ref : m_refs) {
@@ -117,8 +165,10 @@ void RemoveKeyframesCommand::apply(FileData& data)
         if (!object)
             continue;
         const int index = keyframeIndexAt(object->keyframes, ref.t);
-        if (index >= 0)
+        if (index >= 0) {
             object->keyframes.removeAt(index);
+            dropPathsAtEndpoint(data, ref.id, ref.t); // 阶段12：相邻两段路径丢弃
+        }
     }
 }
 
@@ -128,6 +178,7 @@ void RemoveKeyframesCommand::revert(FileData& data)
         if (ObjectData* object = findObject(data, entry.first))
             object->keyframes = entry.second;
     }
+    data.paths = m_oldPaths;
 }
 
 // ---- MoveKeyframeCommand ----
@@ -147,6 +198,7 @@ void MoveKeyframeCommand::apply(FileData& data)
     if (!m_captured) {
         m_oldKeyframes = object->keyframes;
         m_oldDuration = data.timeline.duration;
+        m_oldPaths = data.paths;
         m_captured = true;
     }
     const int index = keyframeIndexAt(object->keyframes, m_oldT);
@@ -156,6 +208,7 @@ void MoveKeyframeCommand::apply(FileData& data)
     moved.t = m_newT;
     object->keyframes.removeAt(index);
     upsertKeyframe(object->keyframes, moved); // 目标时刻已有帧 → 覆盖
+    rebindPaths(data, m_id, m_oldT, m_newT);  // 阶段12：段标识跟随重绑定
     ensureDuration(data, m_newT);
 }
 
@@ -164,6 +217,7 @@ void MoveKeyframeCommand::revert(FileData& data)
     if (ObjectData* object = findObject(data, m_id))
         object->keyframes = m_oldKeyframes;
     data.timeline.duration = m_oldDuration;
+    data.paths = m_oldPaths;
 }
 
 // ---- MoveKeyframesCommand ----
@@ -188,6 +242,7 @@ void MoveKeyframesCommand::apply(FileData& data)
             }
         }
         m_oldDuration = data.timeline.duration;
+        m_oldPaths = data.paths;
         m_captured = true;
     }
     // 逐帧顺序处理：同批两帧钳到同一时刻（如同遭 clamp 到 0）时列表靠后者的
@@ -203,6 +258,7 @@ void MoveKeyframesCommand::apply(FileData& data)
         moved.t = qMax(0.0, ref.t + m_deltaT);
         object->keyframes.removeAt(index);
         upsertKeyframe(object->keyframes, moved); // 目标时刻已有帧 → 覆盖
+        rebindPaths(data, ref.id, ref.t, moved.t); // 阶段12：段标识跟随重绑定
         ensureDuration(data, moved.t);
     }
 }
@@ -214,6 +270,7 @@ void MoveKeyframesCommand::revert(FileData& data)
             object->keyframes = entry.second;
     }
     data.timeline.duration = m_oldDuration;
+    data.paths = m_oldPaths;
 }
 
 // ---- AddSceneLabelCommand ----

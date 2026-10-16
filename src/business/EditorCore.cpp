@@ -1,6 +1,8 @@
 #include "EditorCore.h"
 
 #include "KeyframeCommands.h"
+#include "PathCommands.h"
+#include "PathGeometry.h"
 #include "data/AppSettings.h"
 #include "data/RuntimeData.h"
 
@@ -28,6 +30,14 @@ EditorCore::EditorCore(RuntimeData* runtimeData, QObject* parent)
 {
     // 数据替换后剔除已不存在对象的选中态（删除/撤销/打开新文件等）
     connect(m_runtimeData, &RuntimeData::fileDataChanged, this, &EditorCore::pruneSelection);
+    // 阶段12：命令提交/撤销后防御性剔除失效的选中路径（段或路径点不存在即清除）
+    connect(m_runtimeData, &RuntimeData::fileDataChanged, this, &EditorCore::pruneActivePath);
+    // 阶段12：对象选中变化清除选中路径（选中对象 → Inspector 回对象页；
+    // 清空选择不动路径——路径点方向键微调依赖无对象选中 + activePath 共存）
+    connect(&m_selection, &SelectionModel::selectionChanged, this, [this] {
+        if (m_activePath && !m_selection.isEmpty())
+            setActivePath(std::nullopt);
+    });
     // 文件整体替换（新建/打开成功）时清空撤销栈
     connect(m_runtimeData, &RuntimeData::fileReplaced, this, [this] {
         m_undoStack.clear();
@@ -271,7 +281,8 @@ bool EditorCore::setTransformsAtCursor(const QList<ObjectTransform>& updates,
             continue;
         // 值等于当前显示值（无帧时 = 静态/插值值）→ 无视觉变化，跳过
         // （零位移拖拽不产生关键帧也不弹窗；显式打帧走 keyframeSelectionAtCursor）
-        const Transform shown = TimelinePlayer::interpolate(*object, t);
+        const Transform shown = TimelinePlayer::interpolate(
+            *object, m_runtimeData->fileData().paths, t);
         if (update.value == shown)
             continue;
         bool hasAtCursor = false;
@@ -303,8 +314,8 @@ bool EditorCore::moveSelectionBy(const QPointF& deltaCm,
         if (!object || object->type == ObjectType::Group)
             continue;
         // 以当前时刻显示值（插值结果）为基准平移，提交新绝对值
-        const Transform base =
-            TimelinePlayer::interpolate(*object, m_timelinePlayer.currentTime());
+        const Transform base = TimelinePlayer::interpolate(
+            *object, m_runtimeData->fileData().paths, m_timelinePlayer.currentTime());
         updates.append({ id,
                          { base.x + deltaCm.x(), base.y + deltaCm.y(), base.rotation } });
     }
@@ -338,7 +349,8 @@ bool EditorCore::displayTransform(const QString& id, Transform& out) const
     const ObjectData* object = findObject(id);
     if (!object)
         return false;
-    out = TimelinePlayer::interpolate(*object, m_timelinePlayer.currentTime());
+    out = TimelinePlayer::interpolate(*object, m_runtimeData->fileData().paths,
+                                      m_timelinePlayer.currentTime());
     return true;
 }
 
@@ -514,6 +526,113 @@ void EditorCore::setActiveSegment(const std::optional<SegmentRef>& segment)
         return; // 相同值不重发信号（渲染层每帧都可能重报）
     m_activeSegment = segment;
     emit activeSegmentChanged();
+    // 双帧态消失/变更：选中路径一并清除（白线只在双帧态显示）
+    if (m_activePath
+        && (!segment || m_activePath->segment != *segment))
+        setActivePath(std::nullopt);
+}
+
+void EditorCore::setActivePath(const std::optional<ActivePathRef>& path)
+{
+    if (m_activePath == path)
+        return;
+    m_activePath = path;
+    emit activePathChanged();
+}
+
+void EditorCore::pruneActivePath()
+{
+    if (!m_activePath)
+        return;
+    const ActivePathRef& path = *m_activePath;
+    // 段帧存在性（选中路径的段必须仍是该对象的相邻两帧标识——帧存在即可，
+    // 相邻性/双帧态由画布侧维护）
+    QPointF fromPos;
+    QPointF toPos;
+    if (!resolveSegmentEndpoints(m_runtimeData->fileData(), path.segment.objectId,
+                                 path.segment.from, path.segment.to, fromPos, toPos)) {
+        setActivePath(std::nullopt);
+        return;
+    }
+    // 路径点下标越界（删点/撤销后）→ 回退为仅路径选中
+    if (path.pointIndex >= 0) {
+        const PathData* data = findPath(path.segment.objectId, path.segment.from,
+                                        path.segment.to);
+        const int count = data ? data->points.size() : 0;
+        if (path.pointIndex >= count) {
+            ActivePathRef fixed = path;
+            fixed.pointIndex = count - 1; // 删空 → -1（仅路径选中）
+            setActivePath(fixed);
+        }
+    }
+}
+
+// ---- 移动路径（阶段12，全部走命令入撤销栈）----
+
+const PathData* EditorCore::findPath(const QString& objectId, double from, double to) const
+{
+    return PathGeometry::findPathData(m_runtimeData->fileData().paths, objectId, from, to);
+}
+
+bool EditorCore::setPathType(const QString& objectId, double from, double to,
+                             PathType type)
+{
+    if (!findObject(objectId))
+        return false;
+    return executeCommand(
+        std::make_unique<SetPathTypeCommand>(objectId, from, to, type));
+}
+
+bool EditorCore::setPathLegAngle(const QString& objectId, double from, double to,
+                                 int legIndex, double angleDeg)
+{
+    if (!findObject(objectId))
+        return false;
+    return executeCommand(
+        std::make_unique<SetPathLegAngleCommand>(objectId, from, to, legIndex, angleDeg));
+}
+
+bool EditorCore::addPathPoint(const QString& objectId, double from, double to,
+                              const QPointF& scenePos)
+{
+    if (!findObject(objectId))
+        return false;
+    return executeCommand(
+        std::make_unique<AddPathPointCommand>(objectId, from, to, scenePos));
+}
+
+bool EditorCore::movePathPoint(const QString& objectId, double from, double to,
+                               int pointIndex, const QPointF& scenePos)
+{
+    if (!findObject(objectId))
+        return false;
+    return executeCommand(
+        std::make_unique<MovePathPointCommand>(objectId, from, to, pointIndex, scenePos));
+}
+
+bool EditorCore::removePathPoint(const QString& objectId, double from, double to,
+                                 int pointIndex)
+{
+    if (!findObject(objectId))
+        return false;
+    return executeCommand(
+        std::make_unique<RemovePathPointCommand>(objectId, from, to, pointIndex));
+}
+
+bool EditorCore::setPathPointT(const QString& objectId, double from, double to,
+                               int pointIndex, double t)
+{
+    if (!findObject(objectId))
+        return false;
+    return executeCommand(
+        std::make_unique<SetPathPointTCommand>(objectId, from, to, pointIndex, t));
+}
+
+bool EditorCore::resetPath(const QString& objectId, double from, double to)
+{
+    if (!findObject(objectId))
+        return false;
+    return executeCommand(std::make_unique<ResetPathCommand>(objectId, from, to));
 }
 
 // ---- 台下准备区（阶段10）----

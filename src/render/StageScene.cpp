@@ -4,13 +4,16 @@
 #include "RenderUtil.h"
 #include "ScreenItem.h"
 #include "StageObjectItem.h"
+#include "business/PathGeometry.h"
 #include "business/SelectionModel.h"
 #include "business/TimelinePlayer.h"
 #include "data/AppSettings.h"
 #include "data/RuntimeData.h"
 
-#include <QGraphicsLineItem>
+#include <QGraphicsEllipseItem>
+#include <QGraphicsPathItem>
 #include <QPainter>
+#include <QPainterPath>
 
 #include <cmath>
 
@@ -33,9 +36,10 @@ StageScene::StageScene(RuntimeData* runtimeData, SelectionModel* selection,
 void StageScene::rebuild()
 {
     clear();
-    // clear() 连幽灵/白线一起删了：重置覆盖物句柄，末尾按段引用重铺
+    // clear() 连幽灵/路径/标记一起删了：重置覆盖物句柄，末尾按段引用重铺
     m_segmentGhosts.clear();
-    m_segmentLine = nullptr;
+    m_segmentPathItem = nullptr;
+    m_pointMarkers.clear();
 
     const FileData& file = m_runtimeData->fileData();
     for (const ObjectData& object : file.objects) {
@@ -77,7 +81,8 @@ void StageScene::applyDisplayTransforms()
         StageObjectItem* item = itemById(object.id);
         if (!item)
             continue;
-        const Transform value = TimelinePlayer::interpolate(object, m_player->currentTime());
+        const Transform value =
+            TimelinePlayer::interpolate(object, file.paths, m_player->currentTime());
         item->setPos(value.x, value.y);
         item->setRotation(RenderUtil::toQtRotation(value.rotation));
     }
@@ -142,14 +147,38 @@ void StageScene::setActiveSegment(const std::optional<SegmentRef>& segment)
     refreshSegmentOverlay();
 }
 
+void StageScene::setActivePath(const std::optional<ActivePathRef>& path)
+{
+    m_activePath = path;
+    refreshSegmentOverlay();
+}
+
+void StageScene::setPathPointPreview(const std::optional<QPair<int, QPointF>>& preview)
+{
+    m_pathPointPreview = preview;
+    refreshSegmentOverlay();
+}
+
+QList<QPointF> StageScene::pathPointMarkerPositions() const
+{
+    QList<QPointF> positions;
+    for (const QGraphicsEllipseItem* marker : m_pointMarkers)
+        positions.append(marker->pos());
+    return positions;
+}
+
 void StageScene::refreshSegmentOverlay()
 {
     // 先清旧覆盖物（QGraphicsItem 析构自动离场景）
     for (StageObjectItem* ghost : m_segmentGhosts)
         delete ghost;
     m_segmentGhosts.clear();
-    delete m_segmentLine;
-    m_segmentLine = nullptr;
+    delete m_segmentPathItem;
+    m_segmentPathItem = nullptr;
+    for (QGraphicsEllipseItem* marker : m_pointMarkers)
+        delete marker;
+    m_pointMarkers.clear();
+    m_segmentPolyline.clear();
 
     if (!m_segment)
         return;
@@ -174,15 +203,57 @@ void StageScene::refreshSegmentOverlay()
     }
     if (!fromKey || !toKey)
         return;
+    const QPointF fromPos(fromKey->x, fromKey->y);
+    const QPointF toPos(toKey->x, toKey->y);
 
-    // 直线白线：两端点 = 两帧位置，cosmetic 恒宽不随缩放变化；压在对象与幽灵之下
+    // 路径数据工作副本：拖拽预览中的路径点取预览位置（不写数据）
+    PathData pathWorking;
+    const PathData* pathData = PathGeometry::findPathData(
+        m_runtimeData->fileData().paths, m_segment->objectId, m_segment->from,
+        m_segment->to);
+    if (pathData) {
+        pathWorking = *pathData;
+        if (m_pathPointPreview && m_pathPointPreview->first >= 0
+            && m_pathPointPreview->first < pathWorking.points.size()) {
+            pathWorking.points[m_pathPointPreview->first] =
+                PathPoint { m_pathPointPreview->second.x(), m_pathPointPreview->second.y() };
+        }
+    }
+
+    // 路径折线：段内有 PathData → 复合曲线采样（与插值同一实现）；否则直线
+    if (pathData)
+        m_segmentPolyline = PathGeometry::samplePath(pathWorking, fromPos, toPos);
+    else
+        m_segmentPolyline = { fromPos, toPos };
+
+    // 恒宽白线（cosmetic 不随缩放变化）：直线/弧线统一的折线；压在对象与幽灵之下
+    QPainterPath linePath(m_segmentPolyline.first());
+    for (int i = 1; i < m_segmentPolyline.size(); ++i)
+        linePath.lineTo(m_segmentPolyline.at(i));
     QPen linePen(Qt::white);
     linePen.setCosmetic(true);
     linePen.setWidth(2);
-    m_segmentLine = addLine(QLineF(QPointF(fromKey->x, fromKey->y),
-                                   QPointF(toKey->x, toKey->y)),
-                            linePen);
-    m_segmentLine->setZValue(-2.0);
+    m_segmentPathItem = addPath(linePath, linePen);
+    m_segmentPathItem->setZValue(-2.0);
+
+    // 路径点标记：仅选中路径（activePath 命中当前段）时显示；缩放恒定尺寸
+    // （ItemIgnoresTransformations），选中点蓝色高亮；预览拖拽随动
+    if (pathData && m_activePath && m_activePath->segment == *m_segment) {
+        for (int i = 0; i < pathWorking.points.size(); ++i) {
+            const bool selected = m_activePath->pointIndex == i;
+            auto* marker = new QGraphicsEllipseItem(-5.0, -5.0, 10.0, 10.0);
+            marker->setFlag(QGraphicsItem::ItemIgnoresTransformations);
+            marker->setPos(pathWorking.points.at(i).x, pathWorking.points.at(i).y);
+            QPen markerPen(QColor(QStringLiteral("#202020")));
+            markerPen.setCosmetic(true);
+            marker->setPen(markerPen);
+            marker->setBrush(selected ? QColor(QStringLiteral("#4a90d9")) // 选中高亮蓝
+                                      : QColor(Qt::white));
+            marker->setZValue(-0.5); // 路径线之上、幽灵与对象之下
+            addItem(marker);
+            m_pointMarkers.append(marker);
+        }
+    }
 
     // 幽灵：复用 ActorItem/ScreenItem 渲染（含朝向三角/凸点），位姿取关键帧数据值
     // （与插值显示值分离）；前帧不透明、后帧 0.4 透明；幽灵标记 → 选中/命中/显示值
@@ -198,7 +269,7 @@ void StageScene::refreshSegmentOverlay()
         ghost->setPos(key.x, key.y);
         ghost->setRotation(RenderUtil::toQtRotation(key.rotation));
         ghost->setOpacity(opacity);
-        ghost->setZValue(-1.0); // 白线之上、正常对象之下
+        ghost->setZValue(-1.0); // 路径线之上、正常对象之下
         addItem(ghost);
         return ghost;
     };

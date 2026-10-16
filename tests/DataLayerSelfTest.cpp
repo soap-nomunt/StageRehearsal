@@ -26,9 +26,15 @@
 // 阶段11：存档 v3——PrepAreaData 新增 color（显式色往返 / invalid = 派生态 /
 // v2 存档 prepAreas 无 color 键宽容迁移为派生态 / 受理区间 [1,3]，version=4 才拒）；
 // setPrepAreas 颜色变更生效（operator== 含 color，dirty 判定不失效）。
+// 阶段12：存档 v4——FileData.paths 移动路径（往返逐字段 / v3 无 paths 节点宽容
+// 迁移为空 / 受理区间 [1,4]，version=5 才拒）；EditorCore 路径命令（类型切换/
+// 圆心角钳制/加点保形/拖点/删点合并/t 滑动保序/恢复直线）与关键帧级联（改时刻
+// 重绑定、段内打帧丢弃、删帧相邻两段丢弃、删对象级联）及撤销恢复；插值弧长匀速
+// 数值断言（等 t 步进 = 等弧长步进，无路径段与旧行为逐位一致）。
 #include "business/Commands.h"
 #include "business/EditorCore.h"
 #include "business/KeyframeCommands.h"
+#include "business/PathGeometry.h"
 #include "business/SelectionModel.h"
 #include "business/TimelinePlayer.h"
 #include "business/UndoStack.h"
@@ -44,6 +50,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLineF>
 #include <QProcess>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -137,6 +144,16 @@ FileData makeSampleData()
     prep2.height = 400.0;
     // color 保持 invalid（阶段11：派生态路径）
     data.prepAreas.append(prep2);
+
+    // 移动路径（阶段12，v4）：actor-001 的 2.0→5.5 段配一条弧线（1 路径点 + 2 段圆心角）
+    PathData path;
+    path.objectId = QStringLiteral("actor-001");
+    path.from = 2.0;
+    path.to = 5.5;
+    path.type = PathType::Arc;
+    path.points = { PathPoint { 500.0, 100.0 } };
+    path.legAngles = { 20.0, -15.0 };
+    data.paths.append(path);
 
     data.timeline.duration = 90.5;
     data.timeline.labels = {
@@ -1442,6 +1459,9 @@ void testRoundTrip(QTemporaryDir& dir)
           "准备区 color 往返一致（显式色 → \"#rrggbb\"）");
     CHECK(!loaded.prepAreas.at(1).color.isValid(),
           "准备区 color 往返一致（派生态 → 空串 → invalid）");
+    CHECK(loaded.paths.size() == 1, "路径数量一致");
+    CHECK(loaded.paths == original.paths,
+          "PathData（object/from/to/type/points/legAngles）逐字段一致");
     CHECK(loaded.timeline == original.timeline, "TimelineData（含场次标签）逐字段一致");
     CHECK(loaded == original, "FileData 整体一致");
 }
@@ -1462,19 +1482,20 @@ void testCorruptedFile(QTemporaryDir& dir)
     CHECK(!arrayResult.ok() && arrayResult.error == LoadError::Parse, "根节点为数组返回 LoadError::Parse");
 }
 
-// 阶段11 改写：版本受理区间 [1, 3]——v4（未来版本）拒载；v1 存档（无 prepAreas
-// 节点）宽容迁移为空列表；v2 存档（prepAreas 元素无 color 键）宽容迁移为派生态
-// （仿 testParentGroupJson 的剥字段兼容模式）
+// 阶段12 改写：版本受理区间 [1, 4]——v5（未来版本）拒载；v1 存档（无 prepAreas
+// 节点）宽容迁移为空列表；v2 存档（prepAreas 元素无 color 键）宽容迁移为派生态；
+// v3 存档（无 paths 节点）宽容迁移为空路径列表（仿 testParentGroupJson 的剥字段
+// 兼容模式）
 void testVersionMismatch(QTemporaryDir& dir)
 {
     QJsonObject root = JsonStore::toJson(FileData::createDefault());
 
-    root[QStringLiteral("version")] = 4;
-    const QString futurePath = dir.filePath(QStringLiteral("v4.json"));
+    root[QStringLiteral("version")] = 5;
+    const QString futurePath = dir.filePath(QStringLiteral("v5.json"));
     writeTextFile(futurePath, QJsonDocument(root).toJson());
     const LoadResult futureResult = JsonStore::load(futurePath);
     CHECK(!futureResult.ok() && futureResult.error == LoadError::UnsupportedVersion,
-          "version=4（高于当前）返回 LoadError::UnsupportedVersion");
+          "version=5（高于当前）返回 LoadError::UnsupportedVersion");
 
     root[QStringLiteral("version")] = 0;
     const QString lowPath = dir.filePath(QStringLiteral("v0.json"));
@@ -1490,26 +1511,29 @@ void testVersionMismatch(QTemporaryDir& dir)
     CHECK(!missingResult.ok() && missingResult.error == LoadError::UnsupportedVersion,
           "version 缺失返回 LoadError::UnsupportedVersion");
 
-    // v1 存档迁移：真实构造一份无 prepAreas 节点的 JSON（toJson 恒写 prepAreas，
-    // 须剥掉该节点模拟 v1 存档）
+    // v1 存档迁移：真实构造一份无 prepAreas/paths 节点的 JSON（toJson 恒写这两个
+    // 节点，须剥掉模拟 v1 存档）
     QJsonObject v1 = JsonStore::toJson(makeSampleData());
     v1[QStringLiteral("version")] = 1;
     v1.remove(QStringLiteral("prepAreas"));
+    v1.remove(QStringLiteral("paths"));
     const QString v1Path = dir.filePath(QStringLiteral("v1-legacy.json"));
     writeTextFile(v1Path, QJsonDocument(v1).toJson());
     const LoadResult v1Result = JsonStore::load(v1Path);
-    CHECK(v1Result.ok(), "v1 存档（无 prepAreas 节点）加载成功：" + v1Result.message);
+    CHECK(v1Result.ok(), "v1 存档（无 prepAreas/paths 节点）加载成功：" + v1Result.message);
     if (v1Result.ok()) {
         CHECK(v1Result.data.version == kFileDataVersion, "v1 迁移后版本号升到当前版本");
         CHECK(v1Result.data.prepAreas.isEmpty(), "v1 迁移：prepAreas 缺省为空列表");
+        CHECK(v1Result.data.paths.isEmpty(), "v1 迁移：paths 缺省为空列表");
         CHECK(v1Result.data.objects == makeSampleData().objects,
               "v1 迁移：对象数据不受影响");
     }
 
     // v2 存档迁移：prepAreas 元素无 color 键（剥字段模式），加载成功且颜色均为
-    // invalid（派生态，视觉零变化）
+    // invalid（派生态，视觉零变化）；无 paths 节点 → 空列表
     QJsonObject v2 = JsonStore::toJson(makeSampleData());
     v2[QStringLiteral("version")] = 2;
+    v2.remove(QStringLiteral("paths"));
     QJsonArray v2Areas = v2.value(QStringLiteral("prepAreas")).toArray();
     for (int i = 0; i < v2Areas.size(); ++i) {
         QJsonObject area = v2Areas.at(i).toObject();
@@ -1528,10 +1552,26 @@ void testVersionMismatch(QTemporaryDir& dir)
         for (const PrepAreaData& area : v2Result.data.prepAreas)
             allDerived = allDerived && !area.color.isValid();
         CHECK(allDerived, "v2 迁移：准备区 color 缺省为 invalid（派生态）");
+        CHECK(v2Result.data.paths.isEmpty(), "v2 迁移：paths 缺省为空列表");
         const QList<PrepAreaData> sampleAreas = makeSampleData().prepAreas;
         CHECK(v2Result.data.prepAreas.first().x == sampleAreas.first().x
                   && v2Result.data.prepAreas.first().width == sampleAreas.first().width,
               "v2 迁移：准备区其余字段不受影响");
+    }
+
+    // v3 存档迁移：无 paths 节点（剥字段模式）→ 加载成功、空路径列表、其余不变
+    QJsonObject v3 = JsonStore::toJson(makeSampleData());
+    v3[QStringLiteral("version")] = 3;
+    v3.remove(QStringLiteral("paths"));
+    const QString v3Path = dir.filePath(QStringLiteral("v3-legacy.json"));
+    writeTextFile(v3Path, QJsonDocument(v3).toJson());
+    const LoadResult v3Result = JsonStore::load(v3Path);
+    CHECK(v3Result.ok(), "v3 存档（无 paths 节点）加载成功：" + v3Result.message);
+    if (v3Result.ok()) {
+        CHECK(v3Result.data.version == kFileDataVersion, "v3 迁移后版本号升到当前版本");
+        CHECK(v3Result.data.paths.isEmpty(), "v3 迁移：paths 缺省为空列表（全部直线）");
+        CHECK(v3Result.data.prepAreas == makeSampleData().prepAreas,
+              "v3 迁移：准备区数据不受影响");
     }
 
     // 显式空串 color 同样宽容为 invalid（恒写空串的派生态存档读回路径）
@@ -1956,6 +1996,298 @@ void testPrepAreas()
     Q_UNUSED(id4);
 }
 
+// 阶段12：移动路径——JsonStore 宽容解析（非法 type/legAngles 长度）/ operator==
+// 传导（dirty 判定）/ EditorCore 路径命令（类型切换/圆心角钳制/加点保形/拖点/
+// 删点合并/t 滑动保序/恢复直线/零存储默认态）/ 级联（改时刻重绑定、段内打帧丢弃、
+// 删帧相邻两段丢弃、删对象级联）与撤销恢复 / 插值弧长匀速数值断言
+void testPaths()
+{
+    CHECK(FileData::createDefault().paths.isEmpty(), "createDefault：路径为空列表");
+
+    // ---- JsonStore 宽容解析 ----
+    {
+        QJsonObject root = JsonStore::toJson(FileData::createDefault());
+        QJsonArray paths;
+        QJsonObject badType;
+        badType[QStringLiteral("object")] = QStringLiteral("actor-001");
+        badType[QStringLiteral("from")] = 1.0;
+        badType[QStringLiteral("to")] = 2.0;
+        badType[QStringLiteral("type")] = QStringLiteral("curve"); // 非法 → 宽容 Line
+        QJsonArray onePoint;
+        QJsonObject point;
+        point[QStringLiteral("x")] = 100.0;
+        point[QStringLiteral("y")] = 50.0;
+        onePoint.append(point);
+        badType[QStringLiteral("points")] = onePoint;
+        QJsonArray shortAngles; // 长度 1 ≠ points+1=2 → 补 0
+        shortAngles.append(30.0);
+        badType[QStringLiteral("legAngles")] = shortAngles;
+        paths.append(badType);
+        QJsonObject longAngles = badType;
+        longAngles[QStringLiteral("type")] = QStringLiteral("arc");
+        QJsonArray fourAngles; // 长度 4 → 截断到 2
+        for (double a : { 10.0, 20.0, 30.0, 40.0 })
+            fourAngles.append(a);
+        longAngles[QStringLiteral("legAngles")] = fourAngles;
+        paths.append(longAngles);
+        root[QStringLiteral("paths")] = paths;
+        const LoadResult result = JsonStore::fromJson(root);
+        CHECK(result.ok() && result.data.paths.size() == 2, "路径解析成功（宽容字段）");
+        if (result.ok() && result.data.paths.size() == 2) {
+            CHECK(result.data.paths.at(0).type == PathType::Line,
+                  "非法 type 宽容为 Line");
+            CHECK(result.data.paths.at(0).legAngles == QList<double>({ 30.0, 0.0 }),
+                  "legAngles 长度不足补 0");
+            CHECK(result.data.paths.at(1).type == PathType::Arc
+                      && result.data.paths.at(1).legAngles == QList<double>({ 10.0, 20.0 }),
+                  "legAngles 超长截断到 points+1");
+        }
+        QJsonObject notArray = root;
+        notArray[QStringLiteral("paths")] = 42;
+        CHECK(JsonStore::fromJson(notArray).error == LoadError::InvalidData,
+              "paths 非数组返回 LoadError::InvalidData");
+    }
+
+    // ---- operator== 传导（漏字段 = dirty 跟踪静默失效）----
+    {
+        FileData a = makeSampleData(); // 含 1 条弧线路径
+        FileData b = a;
+        CHECK(a == b, "路径：相同数据相等");
+        b.paths[0].legAngles[0] += 1.0;
+        CHECK(a != b, "路径：legAngles 差异传导到 operator==");
+        b = a;
+        b.paths[0].points[0].x += 1.0;
+        CHECK(a != b, "路径：points 差异传导到 operator==");
+    }
+
+    // ---- EditorCore 路径命令 ----
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+    {
+        // 直提交搭数据（不入撤销栈，后续断言从干净栈起步）：演员 + 2 帧（段 1s→3s）
+        FileData setup = FileData::createDefault();
+        ObjectData actorData;
+        actorData.id = QStringLiteral("actor-001");
+        actorData.type = ObjectType::Actor;
+        actorData.name = QStringLiteral("张三");
+        actorData.keyframes = { Keyframe { 1.0, 100.0, 100.0, 0.0 },
+                                Keyframe { 3.0, 300.0, 100.0, 0.0 } };
+        setup.objects.append(actorData);
+        runtime.commitFileData(setup);
+    }
+    const QString actor = QStringLiteral("actor-001");
+    CHECK(runtime.fileData().objects.first().keyframes.size() == 2 && !core.canUndo(),
+          "路径测试：初始 2 帧段（1s→3s）且撤销栈空");
+    CHECK(runtime.fileData().paths.isEmpty(), "路径测试：初始无 PathData（零存储默认态）");
+
+    // setPathType：切弧线 → 建条目（默认 30° 立即可见）；无点切回直线 → 条目移除
+    CHECK(core.setPathType(actor, 1.0, 3.0, PathType::Arc), "setPathType 切弧线生效");
+    {
+        const PathData* path = core.findPath(actor, 1.0, 3.0);
+        CHECK(path && path->type == PathType::Arc
+                  && path->legAngles == QList<double>({ PathGeometry::kDefaultLegAngleDeg }),
+              "setPathType 切弧线建条目（默认圆心角 30°）");
+    }
+    CHECK(core.setPathType(actor, 1.0, 3.0, PathType::Line), "setPathType 切回直线生效");
+    CHECK(runtime.fileData().paths.isEmpty(),
+          "setPathType 直线且无路径点 → 条目移除（零存储默认态）");
+
+    // setPathLegAngle：±350° 钳制
+    core.setPathType(actor, 1.0, 3.0, PathType::Arc);
+    CHECK(core.setPathLegAngle(actor, 1.0, 3.0, 0, 500.0), "setPathLegAngle 生效");
+    CHECK(core.findPath(actor, 1.0, 3.0)->legAngles.first() == 350.0,
+          "setPathLegAngle 钳制 +350°");
+    core.setPathLegAngle(actor, 1.0, 3.0, 0, -500.0);
+    CHECK(core.findPath(actor, 1.0, 3.0)->legAngles.first() == -350.0,
+          "setPathLegAngle 钳制 -350°");
+    CHECK(core.setPathLegAngle(actor, 1.0, 3.0, 0, 60.0), "setPathLegAngle 改回 60°");
+    CHECK(core.canUndo(), "路径命令入撤销栈");
+
+    // addPathPoint 保形：弧线上加点瞬间形状不变、圆心角按弧长比例拆分
+    const QList<QPointF> before =
+        PathGeometry::samplePath(*core.findPath(actor, 1.0, 3.0),
+                                 QPointF(100.0, 100.0), QPointF(300.0, 100.0));
+    const QList<double> beforeCum = PathGeometry::cumulativeLengths(before);
+    const QPointF clickPos = PathGeometry::pointAtRatio(before, beforeCum, 1.0 / 3.0);
+    CHECK(core.addPathPoint(actor, 1.0, 3.0, clickPos), "addPathPoint 生效");
+    {
+        const PathData* path = core.findPath(actor, 1.0, 3.0);
+        CHECK(path->points.size() == 1 && path->legAngles.size() == 2,
+              "addPathPoint 插入 1 点、圆心角拆成 2 段");
+        const double sum = path->legAngles.at(0) + path->legAngles.at(1);
+        CHECK(qAbs(sum - 60.0) < 1e-6, "addPathPoint 圆心角拆分：θ₁+θ₂ = θ");
+        CHECK(qAbs(path->legAngles.at(0) - 20.0) < 0.5,
+              "addPathPoint 圆心角按弧长比例拆分（1/3 处 → θ₁≈20°）");
+        // 加点后该点仍在原曲线上（吸附点击处的投影）
+        const QList<QPointF> after =
+            PathGeometry::samplePath(*path, QPointF(100.0, 100.0), QPointF(300.0, 100.0));
+        CHECK(PathGeometry::projectToRatio(after, clickPos) > 0.0, "加点后曲线可投影");
+        const double d1 = QLineF(PathGeometry::pointAtRatio(after,
+                                 PathGeometry::cumulativeLengths(after), 1.0 / 3.0),
+                                 clickPos).length();
+        CHECK(d1 < 0.5, "加点瞬间路径形状不变（弧长 1/3 处原位）");
+        const double d2 = QLineF(PathGeometry::pointAtRatio(after,
+                                 PathGeometry::cumulativeLengths(after), 0.7),
+                                 PathGeometry::pointAtRatio(before, beforeCum, 0.7))
+                              .length();
+        CHECK(d2 < 0.5, "加点瞬间路径形状不变（弧长 0.7 处原位）");
+    }
+
+    // movePathPoint + undo 恢复
+    CHECK(core.movePathPoint(actor, 1.0, 3.0, 0, QPointF(200.0, 40.0)),
+          "movePathPoint 生效");
+    CHECK(qAbs(core.findPath(actor, 1.0, 3.0)->points.first().x - 200.0) < 1e-9
+              && qAbs(core.findPath(actor, 1.0, 3.0)->points.first().y - 40.0) < 1e-9,
+          "movePathPoint 写入新位置");
+    CHECK(core.undo(), "movePathPoint 可撤销");
+    CHECK(core.findPath(actor, 1.0, 3.0)->points.first().x
+              == PathGeometry::pointAtRatio(before, beforeCum, 1.0 / 3.0).x(),
+          "undo 恢复路径点原位");
+
+    // setPathPointT：沿曲线滑动重定位（t=0.8 → 点落在弧长 80% 处）；相邻钳制保序
+    CHECK(core.setPathPointT(actor, 1.0, 3.0, 0, 0.8), "setPathPointT 生效");
+    {
+        const PathData* path = core.findPath(actor, 1.0, 3.0);
+        const QList<QPointF> polyline =
+            PathGeometry::samplePath(*path, QPointF(100.0, 100.0), QPointF(300.0, 100.0));
+        const double readBack = PathGeometry::projectToRatio(
+            polyline, QPointF(path->points.first().x, path->points.first().y));
+        CHECK(qAbs(readBack - 0.8) < 0.01, "setPathPointT 滑动后投影回读 ≈ 0.8");
+    }
+    // 保序钳制：再加一点（t≈0.5），把前点 t 改到越过它 → 被钳制不超邻点
+    {
+        const PathData* path = core.findPath(actor, 1.0, 3.0);
+        const QList<QPointF> polyline =
+            PathGeometry::samplePath(*path, QPointF(100.0, 100.0), QPointF(300.0, 100.0));
+        const QPointF mid = PathGeometry::pointAtRatio(
+            polyline, PathGeometry::cumulativeLengths(polyline), 0.5);
+        CHECK(core.addPathPoint(actor, 1.0, 3.0, mid), "保序测试：再加一点（t≈0.5）");
+    }
+    CHECK(core.findPath(actor, 1.0, 3.0)->points.size() == 2, "保序测试：2 个路径点");
+    core.setPathPointT(actor, 1.0, 3.0, 1, 0.1); // 把第二点 t 拉到第一点（t=0.8）之前
+    {
+        const PathData* path = core.findPath(actor, 1.0, 3.0);
+        const QList<QPointF> polyline =
+            PathGeometry::samplePath(*path, QPointF(100.0, 100.0), QPointF(300.0, 100.0));
+        const double t0 = PathGeometry::projectToRatio(
+            polyline, QPointF(path->points.at(0).x, path->points.at(0).y));
+        const double t1 = PathGeometry::projectToRatio(
+            polyline, QPointF(path->points.at(1).x, path->points.at(1).y));
+        CHECK(t0 < t1, "setPathPointT 相邻点 t 钳制保序（t0 < t1 保持）");
+    }
+
+    // removePathPoint：圆心角合并回 ≈60°（拆分逆操作）
+    CHECK(core.removePathPoint(actor, 1.0, 3.0, 1), "removePathPoint 生效");
+    {
+        const PathData* path = core.findPath(actor, 1.0, 3.0);
+        CHECK(path->points.size() == 1 && path->legAngles.size() == 2,
+              "removePathPoint 删点剩 1 点 2 段");
+    }
+    CHECK(core.removePathPoint(actor, 1.0, 3.0, 0), "removePathPoint 删空路径点");
+    {
+        const PathData* path = core.findPath(actor, 1.0, 3.0);
+        CHECK(path && path->points.isEmpty() && path->type == PathType::Arc
+                  && path->legAngles.size() == 1
+                  && qAbs(path->legAngles.first() - 60.0) < 0.5,
+              "removePathPoint 删空后圆心角合并 ≈ 60°（弧线单段保留）");
+    }
+
+    // resetPath：恢复直线 = 条目移除
+    CHECK(core.resetPath(actor, 1.0, 3.0), "resetPath 生效");
+    CHECK(runtime.fileData().paths.isEmpty(), "resetPath 移除 PathData（恢复直线）");
+    while (core.canUndo())
+        core.undo(); // 清栈回到 2 帧直线状态
+    CHECK(runtime.fileData().paths.isEmpty()
+              && runtime.fileData().objects.first().keyframes.size() == 2,
+          "路径测试：清栈回直线状态");
+
+    // ---- 级联：moveKeyframe 段标识重绑定 ----
+    core.setPathType(actor, 1.0, 3.0, PathType::Arc);
+    CHECK(core.moveKeyframe(actor, 3.0, 4.0), "级联：moveKeyframe 改时刻");
+    CHECK(core.findPath(actor, 1.0, 3.0) == nullptr
+              && core.findPath(actor, 1.0, 4.0) != nullptr
+              && runtime.fileData().paths.first().to == 4.0,
+          "级联：路径 to 跟随重绑定 3.0→4.0");
+    CHECK(core.undo() && core.findPath(actor, 1.0, 3.0) != nullptr,
+          "级联：undo 恢复段标识 3.0");
+
+    // ---- 级联：段内 upsert 新帧 → 该段 PathData 静默丢弃；端点更新保留 ----
+    CHECK(core.upsertKeyframe(actor, Keyframe { 2.0, 200.0, 100.0, 0.0 }),
+          "级联：段内打帧（t=2）");
+    CHECK(runtime.fileData().paths.isEmpty(), "级联：段内打帧丢弃该段 PathData");
+    CHECK(core.undo() && core.findPath(actor, 1.0, 3.0) != nullptr,
+          "级联：undo 恢复被丢弃的 PathData");
+    CHECK(core.upsertKeyframe(actor, Keyframe { 1.0, 120.0, 100.0, 0.0 }),
+          "级联：端点帧更新（t=1 改值）");
+    CHECK(core.findPath(actor, 1.0, 3.0) != nullptr,
+          "级联：端点更新保留 PathData（端点派生跟随）");
+    CHECK(core.undo(), "级联：undo 端点更新");
+
+    // ---- 级联：removeKeyframes 删端点帧 → 相邻段 PathData 丢弃 ----
+    CHECK(core.removeKeyframes({ qMakePair(actor, 1.0) }), "级联：删除起始帧");
+    CHECK(runtime.fileData().paths.isEmpty(), "级联：删端点帧丢弃相邻段 PathData");
+    CHECK(core.undo() && core.findPath(actor, 1.0, 3.0) != nullptr
+              && runtime.fileData().objects.first().keyframes.size() == 2,
+          "级联：undo 恢复帧与 PathData");
+
+    // ---- 级联：deleteSelection → 对象全部 PathData 级联删除 ----
+    core.selection()->select(actor);
+    CHECK(core.deleteSelection(), "级联：删除对象");
+    CHECK(runtime.fileData().objects.isEmpty() && runtime.fileData().paths.isEmpty(),
+          "级联：对象删除级联删除其全部 PathData");
+    CHECK(core.undo() && runtime.fileData().paths.size() == 1
+              && runtime.fileData().objects.size() == 1,
+          "级联：undo 恢复对象与 PathData（严格互逆）");
+    while (core.canUndo())
+        core.undo(); // 回到干净状态（防污染后续用例）
+
+    // ---- 插值：弧长匀速数值断言（弧线上等 t 步进 = 等弧长步进） ----
+    {
+        // 单段弧 θ=90°，端点 (0,0)→(200,0)，段 1s→3s
+        ObjectData arcObject;
+        arcObject.id = QStringLiteral("arc-obj");
+        arcObject.keyframes = { Keyframe { 1.0, 0.0, 0.0, 0.0 },
+                                Keyframe { 3.0, 200.0, 0.0, 0.0 } };
+        PathData arc;
+        arc.objectId = arcObject.id;
+        arc.from = 1.0;
+        arc.to = 3.0;
+        arc.type = PathType::Arc;
+        arc.legAngles = { 90.0 };
+        const QList<PathData> paths { arc };
+        // 弧半径 R=100/(2·sin45°)... c=200 → R≈141.42，弧长 = R·π/2 ≈ 222.21
+        QList<QPointF> positions;
+        for (double r : { 0.0, 0.25, 0.5, 0.75, 1.0 }) {
+            const Transform v =
+                TimelinePlayer::interpolate(arcObject, paths, 1.0 + 2.0 * r);
+            positions.append(QPointF(v.x, v.y));
+        }
+        // 等 t → 等弧长（匀速沿路径）
+        bool uniform = true;
+        double step = -1.0;
+        for (int i = 1; i < positions.size(); ++i) {
+            const double dist = QLineF(positions.at(i - 1), positions.at(i)).length();
+            if (step < 0.0)
+                step = dist;
+            uniform = uniform && qAbs(dist - step) < 0.5; // 采样精度容差（每段 32 采样）
+        }
+        CHECK(uniform, "插值：弧线上等 t 步进 = 等弧长步进（弧长匀速）");
+        CHECK(qAbs(step - 222.21 / 4.0) < 1.0, "插值：弧长总量正确（R·π/2）");
+        // 弧长中点在弧顶（左鼓出：行进 +x 方向左侧 = y 负向），≠ 直线中点 (100,0)
+        CHECK(qAbs(positions.at(2).x() - 100.0) < 1.0
+                  && positions.at(2).y() < -40.0,
+              "插值：弧线路径中点落在弧顶（非直线中点）");
+        // 朝向与路径无关（最短弧匀速，此处两帧同向恒 0）
+        CHECK(TimelinePlayer::interpolate(arcObject, paths, 2.0).rotation == 0.0,
+              "插值：朝向不受路径影响");
+        // 无 PathData 段：带路径重载与旧签名逐位一致（既有行为零回归）
+        const Transform legacy = TimelinePlayer::interpolate(arcObject, 2.0);
+        const Transform withPaths =
+            TimelinePlayer::interpolate(arcObject, QList<PathData>(), 2.0);
+        CHECK(legacy == withPaths, "插值：无路径段与旧签名逐位一致");
+    }
+}
+
 // 阶段8：AppSettings 最近使用列表（MRU）语义 + RuntimeData 记录时机。
 // MRU 哨兵在用例开头/结尾清理，避免残留影响下次运行
 void testRecentFiles(QTemporaryDir& dir)
@@ -2102,6 +2434,7 @@ int main(int argc, char* argv[])
     testDirtyTracking(dir);
     testStageSettings();
     testPrepAreas();
+    testPaths();
     testUndoStack(dir);
     testUndoRedoSequence();
     testRecentFiles(dir);

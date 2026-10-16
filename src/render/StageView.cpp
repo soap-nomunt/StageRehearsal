@@ -15,6 +15,7 @@
 #include <QContextMenuEvent>
 #include <QGuiApplication>
 #include <QKeyEvent>
+#include <QLineF>
 #include <QMenu>
 #include <QMouseEvent>
 #include <QPainter>
@@ -141,6 +142,25 @@ void StageView::mousePressEvent(QMouseEvent* event)
             return;
         }
 
+        // 阶段12：双帧态路径命中（对象之后兜底；路径点优先于白线）
+        if (const auto& segment = m_editorCore->activeSegment()) {
+            const int pointIndex = pathPointAtViewPos(m_pressPos);
+            if (pointIndex >= 0) {
+                // 选中路径点 + 待命拖拽（越过阈值转拖动，松开一次性提交）
+                m_editorCore->setActivePath(ActivePathRef { *segment, pointIndex });
+                m_dragMode = DragMode::MaybePathPoint;
+                m_pathPointIndex = pointIndex;
+                event->accept();
+                return;
+            }
+            if (pathLineAtViewPos(m_pressPos)) {
+                // 点选白线 → activePath（Inspector 切路径页），不进框选
+                m_editorCore->setActivePath(ActivePathRef { *segment, -1 });
+                event->accept();
+                return;
+            }
+        }
+
         // 空白处：待判定框选 / 点空白取消选择
         m_dragMode = DragMode::MaybeBand;
         event->accept();
@@ -225,6 +245,25 @@ void StageView::mouseMoveEvent(QMouseEvent* event)
     case DragMode::Banding:
         m_rubberBand->setGeometry(QRect(m_pressPos, pos).normalized());
         break;
+    case DragMode::MaybePathPoint: {
+        // 阶段12：路径点越过阈值转拖动
+        if ((pos - m_pressPos).manhattanLength() < QApplication::startDragDistance())
+            break;
+        m_dragMode = DragMode::MovingPathPoint;
+        viewport()->setCursor(Qt::SizeAllCursor); // 与对象拖拽同款指针
+        break;
+    }
+    case DragMode::MovingPathPoint: {
+        // 拖动中只动本地预览（吸附与对象一致），松开才提交命令
+        if (!m_editorCore->activeSegment()) {
+            m_dragMode = DragMode::None; // 段中途消失（防御）
+            m_scene->setPathPointPreview(std::nullopt);
+            break;
+        }
+        m_scene->setPathPointPreview(
+            std::make_pair(m_pathPointIndex, snappedPoint(mapToScene(pos))));
+        break;
+    }
     case DragMode::None:
         break;
     }
@@ -331,6 +370,21 @@ void StageView::mouseReleaseEvent(QMouseEvent* event)
         break;
     }
 
+    case DragMode::MaybePathPoint:
+        break; // 纯点击 = 选中路径点（按下时已写入 activePath.pointIndex）
+
+    case DragMode::MovingPathPoint: {
+        // 阶段12：松开一次性提交（以松开点吸附值为准；预览清除，由重建回喂）
+        m_scene->setPathPointPreview(std::nullopt);
+        if (const auto& segment = m_editorCore->activeSegment()) {
+            const QPointF scenePos = snappedPoint(mapToScene(event->position().toPoint()));
+            m_editorCore->movePathPoint(segment->objectId, segment->from, segment->to,
+                                        m_pathPointIndex, scenePos);
+        }
+        m_pathPointIndex = -1;
+        break;
+    }
+
     case DragMode::None:
         break;
     }
@@ -365,6 +419,20 @@ void StageView::keyPressEvent(QKeyEvent* event)
         return;
     }
     if (m_editorCore->selection()->isEmpty()) {
+        // 阶段12：无对象选中但有选中路径点 → 方向键微调路径点（不吸附，步长同对象）
+        if (const auto& path = m_editorCore->activePath(); path && path->pointIndex >= 0) {
+            const PathData* data = m_editorCore->findPath(
+                path->segment.objectId, path->segment.from, path->segment.to);
+            if (data && path->pointIndex < data->points.size()) {
+                const PathPoint& point = data->points.at(path->pointIndex);
+                m_editorCore->movePathPoint(path->segment.objectId, path->segment.from,
+                                            path->segment.to, path->pointIndex,
+                                            QPointF(point.x + step.x(),
+                                                    point.y + step.y()));
+            }
+            event->accept();
+            return;
+        }
         QGraphicsView::keyPressEvent(event); // 无选中时保留滚动条默认行为
         return;
     }
@@ -395,6 +463,40 @@ StageObjectItem* StageView::itemAtViewPos(const QPoint& viewPos) const
     return m_scene->topStageItemAt(mapToScene(viewPos));
 }
 
+// 阶段12：路径点命中（屏像素 ≤7px）；标记仅在选中路径时存在（场景侧保证）
+int StageView::pathPointAtViewPos(const QPoint& viewPos) const
+{
+    const QList<QPointF> positions = m_scene->pathPointMarkerPositions();
+    for (int i = 0; i < positions.size(); ++i) {
+        if (QLineF(QPointF(viewPos), mapFromScene(positions.at(i))).length() <= 7.0)
+            return i;
+    }
+    return -1;
+}
+
+// 阶段12：白线命中（屏像素 ≤5px）：点到折线的最近距离
+bool StageView::pathLineAtViewPos(const QPoint& viewPos) const
+{
+    const QList<QPointF> polyline = m_scene->segmentPathPolyline();
+    if (polyline.size() < 2)
+        return false;
+    const QPointF p(viewPos);
+    for (int i = 0; i + 1 < polyline.size(); ++i) {
+        const QPointF a = mapFromScene(polyline.at(i));
+        const QPointF ab = mapFromScene(polyline.at(i + 1)) - a;
+        const double len2 = ab.x() * ab.x() + ab.y() * ab.y();
+        double f = 0.0;
+        if (len2 > 0.0) {
+            f = qBound(0.0,
+                       ((p.x() - a.x()) * ab.x() + (p.y() - a.y()) * ab.y()) / len2, 1.0);
+        }
+        const QPointF proj = a + ab * f;
+        if (std::hypot(p.x() - proj.x(), p.y() - proj.y()) <= 5.0)
+            return true;
+    }
+    return false;
+}
+
 std::function<bool()> StageView::keyframeConfirmCallback() const
 {
     // 业务层只在"未抑制且 T 处无关键帧"时调用；弹窗属渲染层（含"不再提示"勾选）
@@ -421,6 +523,41 @@ void StageView::showContextMenu(const QPoint& viewPos)
 {
     const QPointF scenePos = mapToScene(viewPos);
     SelectionModel* selection = m_editorCore->selection();
+
+    // 阶段12：双帧态路径右键（对象优先、路径点优先于白线）——
+    // 路径点上：删除路径点；白线上：添加路径点 / 恢复直线
+    if (const auto& segment = m_editorCore->activeSegment(); segment && !itemAtViewPos(viewPos)) {
+        const int pointIndex = pathPointAtViewPos(viewPos);
+        if (pointIndex >= 0) {
+            m_editorCore->setActivePath(ActivePathRef { *segment, pointIndex });
+            QMenu menu(this);
+            QAction* removePointAction = menu.addAction(QStringLiteral("删除路径点"));
+            if (menu.exec(viewport()->mapToGlobal(viewPos)) == removePointAction) {
+                m_editorCore->removePathPoint(segment->objectId, segment->from, segment->to,
+                                              pointIndex);
+            }
+            return;
+        }
+        if (pathLineAtViewPos(viewPos)) {
+            m_editorCore->setActivePath(ActivePathRef { *segment, -1 }); // 右键白线先选中路径
+            QMenu menu(this);
+            QAction* addPointAction = menu.addAction(QStringLiteral("添加路径点"));
+            QAction* resetAction = menu.addAction(QStringLiteral("恢复直线"));
+            // 零存储默认态：无 PathData（已是直线）时"恢复直线"禁用
+            resetAction->setEnabled(
+                m_editorCore->findPath(segment->objectId, segment->from, segment->to)
+                != nullptr);
+            QAction* chosen = menu.exec(viewport()->mapToGlobal(viewPos));
+            if (chosen == addPointAction) {
+                // 点吸附落在曲线上（命令内部投影），圆心角保形拆分
+                m_editorCore->addPathPoint(segment->objectId, segment->from, segment->to,
+                                           scenePos);
+            } else if (chosen == resetAction) {
+                m_editorCore->resetPath(segment->objectId, segment->from, segment->to);
+            }
+            return;
+        }
+    }
 
     // 右键落在未选中对象上：先把它单选，菜单操作即作用于它
     if (StageObjectItem* hit = itemAtViewPos(viewPos)) {

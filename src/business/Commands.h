@@ -69,6 +69,7 @@ public:
 private:
     QList<QString> m_ids;
     QList<QPair<int, ObjectData>> m_removed; // (原下标, 对象数据)，下标升序；含级联后代
+    QList<PathData> m_oldPaths;              // 阶段12：对象删除级联路径的快照（整条列表）
     bool m_captured = false;
 };
 

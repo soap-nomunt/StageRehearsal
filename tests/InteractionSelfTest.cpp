@@ -73,6 +73,7 @@
 // 示例存档在 configure 时已拷入 exe 目录，自测经显式 openFromPath 加载 5 个对象。
 
 #include "business/EditorCore.h"
+#include "business/PathGeometry.h"
 #include "business/SelectionModel.h"
 #include "business/TimelinePlayer.h"
 #include "data/RuntimeData.h"
@@ -97,7 +98,7 @@
 #include <QDoubleSpinBox>
 #include <QDropEvent>
 #include <QFile>
-#include <QGraphicsLineItem>
+#include <QGraphicsPathItem>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -2296,7 +2297,7 @@ int main(int argc, char* argv[])
         auto* runtime13 = w13.findChild<RuntimeData*>();
         auto* view13 = qobject_cast<StageView*>(w13.centralWidget());
         auto* scene13 = qobject_cast<StageScene*>(view13->scene());
-        CHECK(runtime13->fileData().version == 3, "阶段11：示例存档版本号 v3");
+        CHECK(runtime13->fileData().version == 4, "阶段12：示例存档版本号 v4");
         CHECK(runtime13->fileData().prepAreas.size() == 2, "阶段10：示例存档含 2 个准备区");
         CHECK(runtime13->fileData().prepAreas.at(0).color == QColor(QStringLiteral("#d35400")),
               "阶段11：示例存档 prep-001 显式独立色");
@@ -2434,8 +2435,8 @@ int main(int argc, char* argv[])
         QFile f2(v2Path);
         CHECK(f2.open(QIODevice::ReadOnly), "阶段10：回读另存文件");
         const QJsonDocument doc = QJsonDocument::fromJson(f2.readAll());
-        CHECK(doc.object().value(QStringLiteral("version")).toDouble() == 3.0,
-              "阶段11：保存后版本号升为 v3");
+        CHECK(doc.object().value(QStringLiteral("version")).toDouble() == 4.0,
+              "阶段12：保存后版本号升为 v4");
         CHECK(doc.object().contains(QStringLiteral("prepAreas"))
                   && doc.object().value(QStringLiteral("prepAreas")).isArray(),
               "阶段10：保存后恒写 prepAreas 数组（空也写 []）");
@@ -2465,7 +2466,7 @@ int main(int argc, char* argv[])
         QTest::qWaitForWindowExposed(&w15);
         CHECK(w15.openFromPath(v2LegacyPath), "阶段11：v2 旧存档（prepAreas 无 color 键）打开成功");
         auto* runtime15 = w15.findChild<RuntimeData*>();
-        CHECK(runtime15->fileData().version == 3, "阶段11：v2 迁移后版本号升为 v3");
+        CHECK(runtime15->fileData().version == 4, "阶段12：v2 迁移后版本号升为 v4");
         CHECK(runtime15->fileData().prepAreas.size() == 2, "阶段11：v2 迁移后准备区保留");
         bool allDerived15 = true;
         for (const PrepAreaData& area : runtime15->fileData().prepAreas)
@@ -2486,14 +2487,17 @@ int main(int argc, char* argv[])
         QFile f3(v3Path);
         CHECK(f3.open(QIODevice::ReadOnly), "阶段11：回读另存文件");
         const QJsonObject root15 = QJsonDocument::fromJson(f3.readAll()).object();
-        CHECK(root15.value(QStringLiteral("version")).toDouble() == 3.0,
-              "阶段11：另存后版本号升为 v3");
+        CHECK(root15.value(QStringLiteral("version")).toDouble() == 4.0,
+              "阶段12：另存后版本号升为 v4");
         const QJsonArray areas15 = root15.value(QStringLiteral("prepAreas")).toArray();
         bool allHaveColorKey = areas15.size() == 2;
         for (const QJsonValue& entry : areas15)
             allHaveColorKey = allHaveColorKey
                 && entry.toObject().contains(QStringLiteral("color"));
         CHECK(allHaveColorKey, "阶段11：另存后 prepAreas 恒写 color 键");
+        CHECK(root15.contains(QStringLiteral("paths"))
+                  && root15.value(QStringLiteral("paths")).isArray(),
+              "阶段12：另存后恒写 paths 数组（空也写 []）");
         CHECK(!runtime15->isDirty(), "阶段11：另存后干净");
     }
 
@@ -2544,9 +2548,14 @@ int main(int argc, char* argv[])
                     o.opacity[slot] = stageItem->opacity();
                     o.pos[slot] = stageItem->pos();
                     o.rotation[slot] = stageItem->rotation();
-                } else if (auto* lineItem = dynamic_cast<QGraphicsLineItem*>(item)) {
+                } else if (auto* pathItem = dynamic_cast<QGraphicsPathItem*>(item)) {
+                    // 路径折线（阶段12 起直线/弧线统一为 QGraphicsPathItem）
                     o.hasLine = true;
-                    o.line = lineItem->line();
+                    const QPainterPath& path = pathItem->path();
+                    o.line = QLineF(
+                        QPointF(path.elementAt(0).x, path.elementAt(0).y),
+                        QPointF(path.elementAt(path.elementCount() - 1).x,
+                                path.elementAt(path.elementCount() - 1).y));
                 }
             }
             return o;
@@ -2682,6 +2691,264 @@ int main(int argc, char* argv[])
             const OverlayState o = overlayState();
             CHECK(o.ghosts == 0 && !o.hasLine, "阶段12：新建后场景无覆盖物");
         }
+    }
+
+    // ============ 阶段12 任务2：路径编辑（点选白线/Inspector 路径页/加点/拖点/级联） ============
+    {
+        MainWindow w17;
+        w17.show();
+        QTest::qWaitForWindowExposed(&w17);
+        auto* core17 = w17.findChild<EditorCore*>();
+        auto* runtime17 = w17.findChild<RuntimeData*>();
+        auto* view17 = qobject_cast<StageView*>(w17.centralWidget());
+        auto* scene17 = qobject_cast<StageScene*>(view17->scene());
+        auto* timeline17 = w17.findChild<TimelineWidget*>();
+        auto* canvas17 = w17.findChild<QWidget*>(QStringLiteral("timelineCanvas"));
+        QWidget* vp17 = view17->viewport();
+        CHECK(core17 && runtime17 && view17 && scene17 && timeline17 && canvas17,
+              "阶段12：路径编辑用例组件装配完整");
+
+        // 造数据：演员甲 2 帧段 1s→3s（(100,100)→(300,100) 直线）
+        CHECK(core17->createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "阶段12：路径编辑：创建演员");
+        const QString actor17 = runtime17->fileData().objects.last().id;
+        core17->upsertKeyframe(actor17, Keyframe { 1.0, 100.0, 100.0, 0.0 });
+        core17->upsertKeyframe(actor17, Keyframe { 3.0, 300.0, 100.0, 0.0 });
+
+        // 双帧态：Ctrl 加选相邻两帧
+        QTest::mouseClick(canvas17, Qt::LeftButton, Qt::NoModifier,
+                          timeline17->canvasPosFor(actor17, 1.0));
+        QTest::mouseClick(canvas17, Qt::LeftButton, Qt::ControlModifier,
+                          timeline17->canvasPosFor(actor17, 3.0));
+        CHECK(core17->activeSegment().has_value(), "阶段12：路径编辑：双帧态就绪");
+
+        // 视口适配到段区域
+        view17->fitInView(QRectF(50.0, -60.0, 350.0, 260.0), Qt::KeepAspectRatio);
+        const auto viewPos = [view17](const QPointF& scenePos) {
+            return view17->mapFromScene(scenePos);
+        };
+
+        auto* pathTypeCombo = w17.findChild<QComboBox*>(QStringLiteral("pathTypeCombo"));
+        auto* pathNameEdit = w17.findChild<QLineEdit*>(QStringLiteral("pathNameEdit"));
+        auto* pathMetrics = w17.findChild<QLabel*>(QStringLiteral("pathMetricsLabel"));
+        auto* pathTSpin = w17.findChild<QDoubleSpinBox*>(QStringLiteral("pathPointTSpin"));
+        CHECK(pathTypeCombo && pathNameEdit && pathMetrics && pathTSpin,
+              "阶段12：Inspector 路径页控件装配完整");
+
+        // ---- 点选白线（直线中点）→ activePath + Inspector 路径页 ----
+        CHECK(!core17->activePath().has_value(), "阶段12：点选前无 activePath");
+        // dirty 对照基准：前置编辑（建对象/打帧）已弄脏文件，点选白线不得改变它
+        const bool dirtyBeforeLineClick = runtime17->isDirty();
+        QTest::mouseClick(vp17, Qt::LeftButton, Qt::NoModifier, viewPos(QPointF(200.0, 100.0)));
+        CHECK(core17->activePath().has_value()
+                  && core17->activePath()->pointIndex == -1,
+              "阶段12：点选白线设置 activePath（仅路径）");
+        CHECK(pathTypeCombo->isVisible(), "阶段12：Inspector 切到路径页");
+        CHECK(pathNameEdit->text() == QStringLiteral("%1_1s至3s").arg(
+                  runtime17->fileData().objects.first().name),
+              "阶段12：路径名派生（<对象名>_<起>s至<止>s）");
+        CHECK(pathNameEdit->isReadOnly(), "阶段12：路径名只读");
+        CHECK(pathTypeCombo->currentIndex() == 0, "阶段12：默认连线类型 = 直线");
+        auto* legSpin0 = w17.findChild<QDoubleSpinBox*>(QStringLiteral("pathLegAngleSpin0"));
+        CHECK(legSpin0 && !legSpin0->isEnabled(),
+              "阶段12：直线时圆心角单行存在但禁用");
+        CHECK(pathMetrics->text().contains(QStringLiteral("段时长 2.0 s")),
+              "阶段12：只读段时长显示");
+        CHECK(runtime17->isDirty() == dirtyBeforeLineClick,
+              "阶段12：点选白线不弄脏文件（纯运行时状态）");
+
+        // ---- 切弧线：类型下拉 → 建 PathData（默认圆心角），白线变弯 ----
+        pathTypeCombo->setCurrentIndex(1); // 弧线（currentIndexChanged → 命令提交）
+        {
+            const PathData* path = core17->findPath(actor17, 1.0, 3.0);
+            CHECK(path && path->type == PathType::Arc
+                      && path->legAngles.size() == 1 && path->legAngles.first() > 0.0,
+                  "阶段12：切弧线建 PathData（默认圆心角）");
+        }
+        CHECK(runtime17->isDirty(), "阶段12：路径类型修改弄脏文件（走命令入撤销栈）");
+        CHECK(legSpin0->isEnabled() && near(legSpin0->value(), 30.0, 0.01),
+              "阶段12：弧线时圆心角行启用并回显默认 30°");
+
+        // ---- 圆心角编辑：数值框提交走命令，弧顶高度随角度变化 ----
+        legSpin0->setValue(90.0);
+        CHECK(near(core17->findPath(actor17, 1.0, 3.0)->legAngles.first(), 90.0, 0.001),
+              "阶段12：圆心角编辑生效（90°）");
+        {
+            // θ=90°，弦 (100,100)→(300,100)：弧顶在行进方向左侧（y 减小）≈ (200, 58.6)
+            const QList<QPointF> polyline = scene17->segmentPathPolyline();
+            const QPointF apex = polyline.at(polyline.size() / 2);
+            CHECK(apex.y() < 100.0 - 30.0, "阶段12：弧线渲染向左鼓出（弧顶 y 明显小于弦）");
+        }
+
+        // ---- 右键白线 → 添加路径点（QTimer 驱动菜单，落点吸附在曲线上） ----
+        const QPointF apexScene(200.0, 58.6);
+        bool menuSeen17 = false;
+        QTimer::singleShot(200, [&menuSeen17] {
+            if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                // 守卫：只在确为路径菜单时回车（防误点对象菜单 Create 卡死）；
+                // 弹了别的菜单则关闭它，让断言失败而不是挂住
+                if (!menu->actions().isEmpty()
+                    && menu->actions().first()->text() == QStringLiteral("添加路径点")) {
+                    menuSeen17 = true;
+                    menu->setActiveAction(menu->actions().first());
+                    QTest::keyClick(menu, Qt::Key_Return);
+                } else {
+                    menu->close();
+                }
+            }
+        });
+        QContextMenuEvent lineEvt(QContextMenuEvent::Mouse, viewPos(apexScene),
+                                  view17->mapToGlobal(viewPos(apexScene)));
+        QApplication::sendEvent(vp17, &lineEvt); // 右键事件真实投递目标是 viewport
+        CHECK(menuSeen17, "阶段12：右键白线弹出路径菜单（添加路径点/恢复直线）");
+        {
+            const PathData* path = core17->findPath(actor17, 1.0, 3.0);
+            CHECK(path && path->points.size() == 1 && path->legAngles.size() == 2,
+                  "阶段12：右键白线添加路径点（1 点 2 段）");
+            // 保形：加点瞬间形状不变——弧顶位置仍在新折线上
+            const QList<QPointF> polyline = scene17->segmentPathPolyline();
+            double minDist = 1e9;
+            for (const QPointF& p : polyline)
+                minDist = qMin(minDist, QLineF(p, apexScene).length());
+            CHECK(minDist < 2.0, "阶段12：加点保形（弧顶仍在新折线上）");
+        }
+        CHECK(scene17->pathPointMarkerPositions().size() == 1,
+              "阶段12：路径点标记显示（选中路径时）");
+
+        // ---- 点选路径点 → activePath.pointIndex + Inspector t 行回显 ----
+        const QPointF pointScene = [core17, actor17] {
+            const PathPoint& p = core17->findPath(actor17, 1.0, 3.0)->points.first();
+            return QPointF(p.x, p.y);
+        }();
+        QTest::mouseClick(vp17, Qt::LeftButton, Qt::NoModifier, viewPos(pointScene));
+        CHECK(core17->activePath().has_value()
+                  && core17->activePath()->pointIndex == 0,
+              "阶段12：点选路径点（pointIndex=0）");
+        CHECK(pathTSpin->isVisible(), "阶段12：选中路径点后 t 行显示");
+        CHECK(near(pathTSpin->value(), 0.5, 0.02),
+              "阶段12：t 回显弧长百分比（弧顶 ≈ 0.5）");
+
+        // ---- 拖拽路径点：拖动中零提交（本地预览随动），松开吸附提交，t 回显跟随 ----
+        runtime17->settings().setGridSnapEnabled(false); // 关吸附保证精确落点
+        int fileSignals17 = 0;
+        QObject::connect(runtime17, &RuntimeData::fileDataChanged, runtime17,
+                         [&fileSignals17] { ++fileSignals17; });
+        const int signalsBeforePointDrag = fileSignals17;
+        // 斜向拖（避开对称位置保证 t 变化可断言）
+        QTest::mousePress(vp17, Qt::LeftButton, Qt::NoModifier, viewPos(pointScene));
+        QTest::mouseMove(vp17, viewPos(pointScene) + QPoint(20, 20)); // 越过阈值
+        QTest::mouseMove(vp17, viewPos(QPointF(150.0, 40.0)));
+        CHECK(fileSignals17 == signalsBeforePointDrag, "阶段12：拖拽路径点中零提交（本地预览）");
+        CHECK(!scene17->pathPointMarkerPositions().isEmpty()
+                  && near(scene17->pathPointMarkerPositions().first().x(), 150.0, 2.0)
+                  && near(scene17->pathPointMarkerPositions().first().y(), 40.0, 2.0),
+              "阶段12：拖拽路径点预览随动（标记与折线同步）");
+        QTest::mouseRelease(vp17, Qt::LeftButton, Qt::NoModifier, viewPos(QPointF(150.0, 40.0)));
+        CHECK(fileSignals17 == signalsBeforePointDrag + 1, "阶段12：拖拽路径点松开单次提交");
+        CHECK(near(core17->findPath(actor17, 1.0, 3.0)->points.first().x, 150.0, 0.5)
+                  && near(core17->findPath(actor17, 1.0, 3.0)->points.first().y, 40.0, 0.5),
+              "阶段12：拖拽路径点提交落点");
+        CHECK(qAbs(pathTSpin->value() - 0.5) > 0.02,
+              "阶段12：拖拽后 t 回显投影弧长百分比（随位置刷新）");
+        CHECK(core17->undo(), "阶段12：undo 拖拽路径点");
+        CHECK(near(core17->findPath(actor17, 1.0, 3.0)->points.first().y,
+                   pointScene.y(), 0.01),
+              "阶段12：undo 恢复路径点位置");
+
+        // ---- 改 t：点沿曲线滑动重定位 ----
+        pathTSpin->setValue(0.25); // valueChanged → 命令
+        {
+            const PathData* path = core17->findPath(actor17, 1.0, 3.0);
+            const double readBack = PathGeometry::projectToRatio(
+                scene17->segmentPathPolyline(),
+                QPointF(path->points.first().x, path->points.first().y));
+            CHECK(near(readBack, 0.25, 0.02), "阶段12：改 t 后点滑动到弧长 25% 处");
+        }
+
+        // ---- 方向键微调路径点（视口焦点，无对象选中）----
+        core17->selection()->clear();
+        vp17->setFocus();
+        const double beforeNudgeX = core17->findPath(actor17, 1.0, 3.0)->points.first().x;
+        QTest::keyClick(vp17, Qt::Key_Left); // -10cm
+        CHECK(near(core17->findPath(actor17, 1.0, 3.0)->points.first().x,
+                   beforeNudgeX - 10.0, 0.01),
+              "阶段12：方向键微调路径点（← -10cm）");
+
+        // ---- Delete 删除路径点（视口焦点；对象级删除让步） ----
+        QTest::keyClick(vp17, Qt::Key_Delete);
+        {
+            const PathData* path = core17->findPath(actor17, 1.0, 3.0);
+            CHECK(path && path->points.isEmpty() && path->type == PathType::Arc,
+                  "阶段12：Delete 删除选中路径点（弧线条目保留为单段弧）");
+        }
+        CHECK(core17->activePath().has_value()
+                  && core17->activePath()->pointIndex == -1,
+              "阶段12：删点后选中点清除（回退仅路径）");
+        core17->undo();
+        CHECK(core17->findPath(actor17, 1.0, 3.0)->points.size() == 1,
+              "阶段12：undo 恢复被删路径点");
+
+        // ---- 右键白线 → 恢复直线（PathData 移除） ----
+        QTimer::singleShot(200, [] {
+            if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                // 守卫：只在确为路径菜单时回车（防误触发其它菜单动作）
+                if (menu->actions().size() >= 2
+                    && menu->actions().at(1)->text() == QStringLiteral("恢复直线")) {
+                    menu->setActiveAction(menu->actions().at(1));
+                    QTest::keyClick(menu, Qt::Key_Return);
+                } else {
+                    menu->close();
+                }
+            }
+        });
+        // 点取第二段弧的中点（避开端点处的演员——对象优先于白线——与路径点标记）
+        const QList<QPointF> polyline17 = scene17->segmentPathPolyline();
+        const QPointF lineHitScene = polyline17.at(polyline17.size() * 3 / 4);
+        QContextMenuEvent resetEvt(QContextMenuEvent::Mouse, viewPos(lineHitScene),
+                                   view17->mapToGlobal(viewPos(lineHitScene)));
+        QApplication::sendEvent(vp17, &resetEvt);
+        CHECK(core17->findPath(actor17, 1.0, 3.0) == nullptr,
+              "阶段12：右键白线恢复直线（PathData 移除）");
+        CHECK(scene17->segmentPathPolyline().size() == 2,
+              "阶段12：恢复直线后白线退化为两点直线");
+
+        // ---- 级联抽验（UI 层）：moveKeyframe 重绑定；删对象级联 + undo ----
+        core17->setPathType(actor17, 1.0, 3.0, PathType::Arc);
+        core17->moveKeyframe(actor17, 3.0, 4.0);
+        CHECK(core17->findPath(actor17, 1.0, 4.0) != nullptr,
+              "阶段12：级联 moveKeyframe 段标识跟随重绑定（UI 层）");
+        core17->selection()->select(actor17);
+        vp17->setFocus();
+        QTest::keyClick(vp17, Qt::Key_Delete); // 对象级删除（无选中路径点）
+        CHECK(runtime17->fileData().objects.isEmpty()
+                  && runtime17->fileData().paths.isEmpty(),
+              "阶段12：级联删除对象 → PathData 级联删除");
+        CHECK(!core17->activePath().has_value(), "阶段12：对象删除后 activePath 防御清除");
+        core17->undo();
+        CHECK(runtime17->fileData().objects.size() == 1
+                  && runtime17->fileData().paths.size() == 1,
+              "阶段12：undo 恢复对象与路径（级联互逆）");
+
+        // ---- Inspector 切回对象页：点视口对象 → activePath 清除 ----
+        core17->setActiveSegment(SegmentRef { actor17, 1.0, 4.0 });
+        core17->setActivePath(ActivePathRef { SegmentRef { actor17, 1.0, 4.0 }, -1 });
+        CHECK(pathTypeCombo->isVisible(), "阶段12：设置 activePath 显示路径页");
+        QTest::mouseClick(vp17, Qt::LeftButton, Qt::NoModifier,
+                          viewPos(QPointF(100.0, 100.0))); // 点在演员甲上（首帧位姿）
+        CHECK(!core17->activePath().has_value(), "阶段12：点选对象清除 activePath");
+        CHECK(!pathTypeCombo->isVisible(), "阶段12：Inspector 切回对象页");
+
+        // 截图存档人工复核（弧线 + 路径点标记 + 幽灵 + Inspector 路径页）
+        // 注意顺序：加点是命令提交（会经画布重派生清除段），段与选中路径在其后设置
+        core17->addPathPoint(actor17, 1.0, 4.0, QPointF(200.0, 70.0)); // 弧上加一点
+        core17->setActiveSegment(SegmentRef { actor17, 1.0, 4.0 });
+        core17->setActivePath(ActivePathRef { SegmentRef { actor17, 1.0, 4.0 }, 0 });
+        view17->grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage12-path-arc.png")));
+        w17.grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage12-path-inspector.png")));
+
+        // 清理哨兵：还原吸附设置
+        runtime17->settings().setGridSnapEnabled(true);
     }
 
     out() << Qt::endl;
