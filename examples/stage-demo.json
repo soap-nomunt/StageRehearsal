@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 4,
   "stage": { "width": 1500, "depth": 900, "centerOffset": 100 },
   "objects": [
     {
@@ -15,7 +15,10 @@
     {
       "id": "actor-003", "type": "actor", "name": "王五", "color": "#27ae60",
       "transform": { "x": 550, "y": 600, "rotation": 270 },
-      "keyframes": []
+      "keyframes": [
+        { "t": 15, "x": 550, "y": 600, "rotation": 270 },
+        { "t": 25, "x": 250, "y": 700, "rotation": 270 }
+      ]
     },
     {
       "id": "screen-001", "type": "screen", "name": "屏风1", "color": "#888888",
@@ -32,6 +35,13 @@
   "prepAreas": [
     { "id": "prep-001", "name": "准备区1", "x": -1050, "y": 450, "width": 400, "height": 300, "color": "#d35400" },
     { "id": "prep-002", "name": "准备区2", "x": 0, "y": 1150, "width": 600, "height": 400 }
+  ],
+  "paths": [
+    {
+      "object": "actor-003", "from": 15, "to": 25, "type": "arc",
+      "points": [ { "x": 380, "y": 520 } ],
+      "legAngles": [ 40, 40 ]
+    }
   ],
   "timeline": {
     "duration": 60.0,

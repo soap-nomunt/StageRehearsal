@@ -83,6 +83,14 @@ void MainWindow::dumpScreenshotForSelfTest(const QString& path)
         defaultPath.replace(QStringLiteral(".png"), QStringLiteral("-1to50.png"));
         m_view->viewport()->grab().save(defaultPath);
 
+        // 阶段12：示例存档含移动路径时，把双帧选中态设到第一条路径的段上再截
+        // （基准图含幽灵 + 弧线路径）；无路径则保持原样
+        if (!m_runtimeData->fileData().paths.isEmpty()) {
+            const PathData& firstPath = m_runtimeData->fileData().paths.first();
+            m_editorCore->setActiveSegment(
+                SegmentRef { firstPath.objectId, firstPath.from, firstPath.to });
+        }
+
         // 适配内容包围盒（舞台 ∪ 准备区，阶段10），准备区进入基准图
         const QRectF content = m_scene->contentRect().adjusted(-80.0, -80.0, 80.0, 80.0);
         m_view->fitInView(content, Qt::KeepAspectRatio);

@@ -2501,6 +2501,62 @@ int main(int argc, char* argv[])
         CHECK(!runtime15->isDirty(), "阶段11：另存后干净");
     }
 
+    // ---- v3 旧存档兼容实测（阶段12 任务3：无 paths 键 → 全线直线、视觉零变化） ----
+    {
+        // 真实构造 version=3、无 paths 节点、演员带关键帧的 JSON 存档
+        const QString v3LegacyPath = tempDir.filePath(QStringLiteral("stage12-v3-legacy.json"));
+        {
+            QFile f(v3LegacyPath);
+            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "阶段12：写入 v3 存档");
+            f.write(R"({
+  "version": 3,
+  "stage": { "width": 1200, "depth": 800, "centerOffset": 0 },
+  "objects": [
+    {
+      "id": "actor-001", "type": "actor", "name": "旧角", "color": "#e74c3c",
+      "transform": { "x": 0, "y": 100, "rotation": 0 },
+      "keyframes": [
+        { "t": 0.0, "x": 0, "y": 100, "rotation": 0 },
+        { "t": 4.0, "x": 200, "y": 100, "rotation": 90 }
+      ]
+    }
+  ],
+  "prepAreas": [
+    { "id": "prep-001", "name": "准备区1", "x": -800, "y": 500, "width": 400, "height": 300, "color": "" }
+  ],
+  "timeline": { "duration": 60.0, "labels": [] }
+})");
+        }
+        MainWindow w17b;
+        w17b.show();
+        QTest::qWaitForWindowExposed(&w17b);
+        CHECK(w17b.openFromPath(v3LegacyPath), "阶段12：v3 旧存档（无 paths 键）打开成功");
+        auto* runtime17b = w17b.findChild<RuntimeData*>();
+        CHECK(runtime17b->fileData().version == 4, "阶段12：v3 迁移后版本号升为 v4");
+        CHECK(runtime17b->fileData().paths.isEmpty(),
+              "阶段12：v3 迁移后无路径（全部直线）");
+        // 视觉零变化：段中点插值 = 直线匀速中点（与无路径旧行为逐位一致）
+        const ObjectData& legacyActor = runtime17b->fileData().objects.first();
+        const Transform mid = TimelinePlayer::interpolate(
+            legacyActor, runtime17b->fileData().paths, 2.0);
+        CHECK(near(mid.x, 100.0, 1e-9) && near(mid.y, 100.0, 1e-9)
+                  && near(mid.rotation, 45.0, 1e-9),
+              "阶段12：v3 旧档段中点 = 直线匀速中点（无路径渲染差异）");
+
+        // 另存回读为 v4 格式且含 paths 键（空数组）
+        const QString v4Path = tempDir.filePath(QStringLiteral("stage12-v3-resaved.json"));
+        CHECK(w17b.saveToPath(v4Path), "阶段12：v3 存档另存成功");
+        QFile f4(v4Path);
+        CHECK(f4.open(QIODevice::ReadOnly), "阶段12：回读另存文件");
+        const QJsonObject root17b = QJsonDocument::fromJson(f4.readAll()).object();
+        CHECK(root17b.value(QStringLiteral("version")).toDouble() == 4.0,
+              "阶段12：另存后版本号升为 v4");
+        CHECK(root17b.contains(QStringLiteral("paths"))
+                  && root17b.value(QStringLiteral("paths")).isArray(),
+              "阶段12：另存后恒写 paths 数组（空也写 []）");
+        CHECK(!runtime17b->isDirty(), "阶段12：另存后干净");
+    }
+
     // ==================== 阶段12：双帧选中态 + 幽灵与直线路径可视化（纯渲染） ====================
     {
         MainWindow w16;
