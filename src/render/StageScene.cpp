@@ -1,6 +1,7 @@
 #include "StageScene.h"
 
 #include "ActorItem.h"
+#include "PropItem.h"
 #include "RenderUtil.h"
 #include "ScreenItem.h"
 #include "StageObjectItem.h"
@@ -51,7 +52,8 @@ void StageScene::rebuild()
             addItem(new ScreenItem(object));
             break;
         case ObjectType::Prop:
-            break; // 道具仅预留占位，本阶段不渲染
+            addItem(new PropItem(object)); // 阶段13：道具进视口
+            break;
         case ObjectType::Group:
             break; // 空对象：纯组织节点，不进视口
         }
@@ -76,8 +78,8 @@ void StageScene::applyDisplayTransforms()
 {
     const FileData& file = m_runtimeData->fileData();
     for (const ObjectData& object : file.objects) {
-        if (object.type != ObjectType::Actor && object.type != ObjectType::Screen)
-            continue; // 空对象/道具不进视口
+        if (object.type == ObjectType::Group)
+            continue; // 空对象不进视口（演员/屏风/道具按当前时刻插值驱动）
         StageObjectItem* item = itemById(object.id);
         if (!item)
             continue;
@@ -263,7 +265,8 @@ void StageScene::refreshSegmentOverlay()
         switch (target->type) {
         case ObjectType::Actor:  ghost = new ActorItem(*target);  break;
         case ObjectType::Screen: ghost = new ScreenItem(*target); break;
-        default: return static_cast<StageObjectItem*>(nullptr); // 空对象/道具不渲染
+        case ObjectType::Prop:   ghost = new PropItem(*target);   break; // 阶段13：道具幽灵
+        default: return static_cast<StageObjectItem*>(nullptr); // 空对象不渲染
         }
         ghost->setGhost(true);
         ghost->setPos(key.x, key.y);

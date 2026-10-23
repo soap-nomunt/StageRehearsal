@@ -315,3 +315,58 @@ void SetScreenSizeCommand::revert(FileData& data)
     if (ObjectData* object = findObject(data, m_id))
         object->size = m_oldSize;
 }
+
+// ---- SetPropScaleCommand / SetPropStandableCommand（阶段13，仅道具） ----
+
+SetPropScaleCommand::SetPropScaleCommand(QString id, double scaleX, double scaleY)
+    : m_id(std::move(id))
+    , m_scaleX(scaleX)
+    , m_scaleY(scaleY)
+{
+}
+
+void SetPropScaleCommand::apply(FileData& data)
+{
+    ObjectData* object = findObject(data, m_id);
+    if (!object || object->type != ObjectType::Prop)
+        return; // 道具以外无缩放语义（防御）
+    if (!m_captured) {
+        m_oldScaleX = object->scaleX;
+        m_oldScaleY = object->scaleY;
+        m_captured = true;
+    }
+    object->scaleX = m_scaleX;
+    object->scaleY = m_scaleY;
+}
+
+void SetPropScaleCommand::revert(FileData& data)
+{
+    if (ObjectData* object = findObject(data, m_id)) {
+        object->scaleX = m_oldScaleX;
+        object->scaleY = m_oldScaleY;
+    }
+}
+
+SetPropStandableCommand::SetPropStandableCommand(QString id, bool standable)
+    : m_id(std::move(id))
+    , m_standable(standable)
+{
+}
+
+void SetPropStandableCommand::apply(FileData& data)
+{
+    ObjectData* object = findObject(data, m_id);
+    if (!object || object->type != ObjectType::Prop)
+        return;
+    if (!m_captured) {
+        m_oldStandable = object->standable;
+        m_captured = true;
+    }
+    object->standable = m_standable;
+}
+
+void SetPropStandableCommand::revert(FileData& data)
+{
+    if (ObjectData* object = findObject(data, m_id))
+        object->standable = m_oldStandable;
+}

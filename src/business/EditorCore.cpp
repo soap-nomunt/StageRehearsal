@@ -102,9 +102,6 @@ bool EditorCore::isNameTaken(const QString& name, const QString& excludeId) cons
 
 bool EditorCore::createObject(ObjectType type, const QPointF& posCm)
 {
-    if (type == ObjectType::Prop)
-        return false; // 道具仅预留占位，暂不可创建
-
     ObjectData object;
     object.id = generateObjectId(type);
     object.type = type;
@@ -119,6 +116,8 @@ bool EditorCore::createObject(ObjectType type, const QPointF& posCm)
             object.size =
                 QSizeF(AppSettings::screenDefaultWidthCm, AppSettings::screenDefaultHeightCm);
         }
+        // 道具（阶段13）：shape 缺省 = 默认 100×100cm 矩形、scale=1、standable=true，
+        // 取成员默认值即可，无需显式赋值
     }
 
     const QString newId = object.id;
@@ -249,8 +248,8 @@ bool EditorCore::reparent(const QList<QString>& ids, const QString& newParentId,
     QSet<QString> idSet;
     for (const QString& id : ids) {
         const ObjectData* object = findObject(id);
-        if (!object || object->type == ObjectType::Prop)
-            return false; // Prop 不出现
+        if (!object)
+            return false;
         idSet.insert(id);
     }
 
@@ -328,7 +327,8 @@ bool EditorCore::canKeyframeSelection() const
     if (id.isEmpty())
         return false;
     const ObjectData* object = findObject(id);
-    return object && (object->type == ObjectType::Actor || object->type == ObjectType::Screen);
+    return object && (object->type == ObjectType::Actor || object->type == ObjectType::Screen
+                      || object->type == ObjectType::Prop); // 阶段13：道具可打帧
 }
 
 bool EditorCore::keyframeSelectionAtCursor()
@@ -501,6 +501,26 @@ bool EditorCore::setScreenSize(const QString& id, const QSizeF& sizeCm)
     if (sizeCm.width() <= 0.0 || sizeCm.height() <= 0.0)
         return false;
     return executeCommand(std::make_unique<SetScreenSizeCommand>(id, sizeCm));
+}
+
+// ---- 道具属性（阶段13）----
+
+bool EditorCore::setPropScale(const QString& id, double scaleX, double scaleY)
+{
+    const ObjectData* object = findObject(id);
+    if (!object || object->type != ObjectType::Prop)
+        return false;
+    if (scaleX < 0.1 || scaleX > 100.0 || scaleY < 0.1 || scaleY > 100.0)
+        return false; // 范围 0.1~100 仅正值（防御；Inspector spin 已钳制）
+    return executeCommand(std::make_unique<SetPropScaleCommand>(id, scaleX, scaleY));
+}
+
+bool EditorCore::setPropStandable(const QString& id, bool standable)
+{
+    const ObjectData* object = findObject(id);
+    if (!object || object->type != ObjectType::Prop)
+        return false;
+    return executeCommand(std::make_unique<SetPropStandableCommand>(id, standable));
 }
 
 bool EditorCore::setStage(const StageData& stage)

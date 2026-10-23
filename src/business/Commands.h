@@ -137,3 +137,36 @@ private:
     QSizeF m_oldSize;
     bool m_captured = false;
 };
+
+// 仅道具（阶段13）：修改缩放（scaleX/scaleY 两值一次提交；xy 绑定语义由
+// Inspector 组装——绑定后一方改动另一方同步增减同一增量，此处只落两值）。
+class SetPropScaleCommand : public Command {
+public:
+    SetPropScaleCommand(QString id, double scaleX, double scaleY);
+
+    void apply(FileData& data) override;
+    void revert(FileData& data) override;
+
+private:
+    QString m_id;
+    double m_scaleX;
+    double m_scaleY;
+    double m_oldScaleX = 1.0;
+    double m_oldScaleY = 1.0;
+    bool m_captured = false;
+};
+
+// 仅道具（阶段13）：切换可供站立（standable=false 的道具阻挡路径编辑，任务3）
+class SetPropStandableCommand : public Command {
+public:
+    SetPropStandableCommand(QString id, bool standable);
+
+    void apply(FileData& data) override;
+    void revert(FileData& data) override;
+
+private:
+    QString m_id;
+    bool m_standable;
+    bool m_oldStandable = true;
+    bool m_captured = false;
+};

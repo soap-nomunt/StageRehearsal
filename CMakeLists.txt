@@ -50,6 +50,8 @@ qt_add_executable(StageRehearsal
     src/render/ActorItem.cpp
     src/render/ScreenItem.h
     src/render/ScreenItem.cpp
+    src/render/PropItem.h
+    src/render/PropItem.cpp
     src/render/StageObjectItem.h
     src/render/StageObjectItem.cpp
     src/render/HierarchyPanel.h
@@ -121,6 +123,7 @@ add_executable(InteractionSelfTest
     src/render/StageView.cpp
     src/render/ActorItem.cpp
     src/render/ScreenItem.cpp
+    src/render/PropItem.cpp
     src/render/StageObjectItem.cpp
     src/render/HierarchyPanel.cpp
     src/render/InspectorPanel.cpp

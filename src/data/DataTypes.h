@@ -12,7 +12,7 @@
 
 #include <optional>
 
-inline constexpr int kFileDataVersion = 4; // v4（阶段12）：新增 paths 节点（关键帧间移动路径）；v1/v2/v3 存档宽容迁移（无 paths = 空列表，全部直线，视觉零变化）
+inline constexpr int kFileDataVersion = 5; // v5（阶段13）：ObjectData 新增道具字段（shape/scaleX/scaleY/standable，仅 type=prop 有意义）；v1~v4 存档宽容迁移（本无道具，缺省即默认）
 
 enum class ObjectType {
     Actor,  // 演员
@@ -66,6 +66,42 @@ inline bool operator==(const Keyframe& a, const Keyframe& b)
 }
 inline bool operator!=(const Keyframe& a, const Keyframe& b) { return !(a == b); }
 
+// 路径点（阶段12）：cm 场景绝对坐标；阶段13 起也用作道具形状的局部顶点
+struct PathPoint {
+    double x = 0.0;
+    double y = 0.0;
+};
+
+inline bool operator==(const PathPoint& a, const PathPoint& b)
+{
+    return a.x == b.x && a.y == b.y;
+}
+inline bool operator!=(const PathPoint& a, const PathPoint& b) { return !(a == b); }
+
+// ---- 舞台道具形状（阶段13，v5 新增；仅 ObjectType::Prop 有意义）----
+// 多边形 + 弧边：局部坐标（以对象位置为原点、未缩放），顶点统一逆时针；
+// 边 i = v[i] → v[(i+1)%n]，边的行进方向即顶点绕向；edgeAngles[i] 为边 i 的
+// 圆心角（度，符号约定同路径编辑：正 = 沿边行进方向左侧鼓出），长度恒 =
+// vertices.size()（圆 = 2 顶点 + 两条 180° 弧边）。
+struct PropShape {
+    QList<PathPoint> vertices;
+    QList<double> edgeAngles;
+};
+
+inline bool operator==(const PropShape& a, const PropShape& b)
+{
+    return a.vertices == b.vertices && a.edgeAngles == b.edgeAngles;
+}
+inline bool operator!=(const PropShape& a, const PropShape& b) { return !(a == b); }
+
+// 默认道具形状：100×100cm 矩形（局部 ±50，顶点绕向逆时针 = 行进方向左侧为内部），
+// 直边（圆心角全 0）
+inline PropShape defaultPropShape()
+{
+    return { { { -50.0, -50.0 }, { -50.0, 50.0 }, { 50.0, 50.0 }, { 50.0, -50.0 } },
+             { 0.0, 0.0, 0.0, 0.0 } };
+}
+
 struct ObjectData {
     QString id;
     ObjectType type = ObjectType::Actor;
@@ -75,6 +111,11 @@ struct ObjectData {
     Transform transform;             // 静态变换：无关键帧时的取值
     std::optional<QSizeF> size;      // 仅屏风有（schema 的 size 节点）
     QList<Keyframe> keyframes;
+    // ---- 道具字段（阶段13，v5；仅 type=Prop 有意义，其余类型恒缺省）----
+    std::optional<PropShape> shape;  // 多边形+弧边形状；缺省 = 默认 100×100cm 矩形
+    double scaleX = 1.0;             // 宽度缩放倍数（0.1~100，1 = 无缩放）
+    double scaleY = 1.0;             // 深度缩放倍数
+    bool standable = true;           // 是否可供站立（false = 阻挡路径编辑，任务3）
 };
 
 // 层级不变式：FileData.objects 列表顺序 = Hierarchy 的深度优先显示顺序
@@ -85,7 +126,9 @@ inline bool operator==(const ObjectData& a, const ObjectData& b)
 {
     return a.id == b.id && a.type == b.type && a.name == b.name && a.parentId == b.parentId
         && a.color == b.color && a.transform == b.transform && a.size == b.size
-        && a.keyframes == b.keyframes;
+        && a.keyframes == b.keyframes
+        && a.shape == b.shape && a.scaleX == b.scaleX && a.scaleY == b.scaleY
+        && a.standable == b.standable; // 道具字段（v5）：漏加 = dirty 跟踪静默失效
 }
 inline bool operator!=(const ObjectData& a, const ObjectData& b) { return !(a == b); }
 
@@ -145,17 +188,6 @@ inline PathType pathTypeFromString(const QString& str)
 {
     return str == QLatin1String("arc") ? PathType::Arc : PathType::Line; // 非法宽容 Line
 }
-
-struct PathPoint {
-    double x = 0.0; // cm，场景绝对坐标
-    double y = 0.0;
-};
-
-inline bool operator==(const PathPoint& a, const PathPoint& b)
-{
-    return a.x == b.x && a.y == b.y;
-}
-inline bool operator!=(const PathPoint& a, const PathPoint& b) { return !(a == b); }
 
 struct PathData {
     QString objectId;

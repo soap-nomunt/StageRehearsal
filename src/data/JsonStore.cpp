@@ -4,6 +4,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 
+#include <cmath>
+
 namespace {
 
 // ---- 序列化辅助 ----
@@ -41,6 +43,28 @@ QJsonObject objectToJson(const ObjectData& o)
         size[QStringLiteral("w")] = o.size->width();
         size[QStringLiteral("h")] = o.size->height();
         obj[QStringLiteral("size")] = size;
+    }
+    if (o.type == ObjectType::Prop) {
+        // 道具字段（v5）：仅 type=prop 时写入；shape 缺省（默认矩形）不写字段
+        obj[QStringLiteral("scaleX")] = o.scaleX;
+        obj[QStringLiteral("scaleY")] = o.scaleY;
+        obj[QStringLiteral("standable")] = o.standable;
+        if (o.shape) {
+            QJsonObject shape;
+            QJsonArray vertices;
+            for (const PathPoint& v : o.shape->vertices) {
+                QJsonObject vertex;
+                vertex[QStringLiteral("x")] = v.x;
+                vertex[QStringLiteral("y")] = v.y;
+                vertices.append(vertex);
+            }
+            shape[QStringLiteral("vertices")] = vertices;
+            QJsonArray edgeAngles;
+            for (double angle : o.shape->edgeAngles)
+                edgeAngles.append(angle);
+            shape[QStringLiteral("edgeAngles")] = edgeAngles;
+            obj[QStringLiteral("shape")] = shape;
+        }
     }
     QJsonArray keyframes;
     for (const Keyframe& k : o.keyframes)
@@ -109,6 +133,8 @@ bool readString(const QJsonObject& obj, const QString& key, QString& out)
     out = v.toString();
     return true;
 }
+
+bool parsePropShape(const QJsonObject& obj, PropShape& out); // 定义在后（宽容回退默认矩形）
 
 bool parseTransform(const QJsonValue& value, Transform& out)
 {
@@ -184,6 +210,28 @@ bool parseObject(const QJsonValue& value, ObjectData& out, QString& error)
         out.size = QSizeF(w, h);
     }
 
+    // 道具字段（v5，仅 type=prop）：缺失宽容缺省；非法值回退缺省；
+    // 非法形状（<3 顶点/零长边/edgeAngles 长度不符）宽容回退默认矩形（nullopt）
+    if (out.type == ObjectType::Prop) {
+        double scale = 1.0;
+        if (readDouble(obj, QStringLiteral("scaleX"), scale)
+            && scale >= 0.1 && scale <= 100.0)
+            out.scaleX = scale;
+        scale = 1.0;
+        if (readDouble(obj, QStringLiteral("scaleY"), scale)
+            && scale >= 0.1 && scale <= 100.0)
+            out.scaleY = scale;
+        const QJsonValue standableValue = obj.value(QStringLiteral("standable"));
+        if (standableValue.isBool())
+            out.standable = standableValue.toBool();
+        const QJsonValue shapeValue = obj.value(QStringLiteral("shape"));
+        if (shapeValue.isObject()) {
+            PropShape shape;
+            if (parsePropShape(shapeValue.toObject(), shape))
+                out.shape = shape; // 非法形状保持 nullopt（默认矩形），不报错
+        }
+    }
+
     const QJsonValue keyframesValue = obj.value(QStringLiteral("keyframes"));
     if (!keyframesValue.isUndefined()) {
         if (!keyframesValue.isArray()) {
@@ -225,6 +273,48 @@ bool parseTimeline(const QJsonValue& value, TimelineData& out)
             return false;
         out.labels.append(label);
     }
+    return true;
+}
+
+// 道具形状宽容解析（阶段13 任务1 简单校验；自交判定属任务2 校验纯函数）：
+// ≥3 顶点、无零长边（相邻顶点间距 > 1cm）、edgeAngles 长度恒 = vertices.size()；
+// 任何一项不符 → 返回 false（调用方回退默认矩形，不报错）
+bool parsePropShape(const QJsonObject& obj, PropShape& out)
+{
+    const QJsonValue verticesValue = obj.value(QStringLiteral("vertices"));
+    if (!verticesValue.isArray())
+        return false;
+    QList<PathPoint> vertices;
+    for (const QJsonValue& vertexValue : verticesValue.toArray()) {
+        if (!vertexValue.isObject())
+            return false;
+        PathPoint vertex;
+        if (!readDouble(vertexValue.toObject(), QStringLiteral("x"), vertex.x)
+            || !readDouble(vertexValue.toObject(), QStringLiteral("y"), vertex.y))
+            return false;
+        vertices.append(vertex);
+    }
+    if (vertices.size() < 3)
+        return false;
+    for (int i = 0; i < vertices.size(); ++i) {
+        const PathPoint& a = vertices.at(i);
+        const PathPoint& b = vertices.at((i + 1) % vertices.size());
+        if (std::hypot(b.x - a.x, b.y - a.y) <= 1.0)
+            return false; // 零长边
+    }
+    QList<double> edgeAngles;
+    const QJsonValue anglesValue = obj.value(QStringLiteral("edgeAngles"));
+    if (anglesValue.isArray()) {
+        for (const QJsonValue& angleValue : anglesValue.toArray()) {
+            if (!angleValue.isDouble())
+                return false;
+            edgeAngles.append(angleValue.toDouble());
+        }
+    }
+    if (edgeAngles.size() != vertices.size())
+        return false; // 长度不符（路径是补 0/截断先例，形状按决策回退默认矩形）
+    out.vertices = vertices;
+    out.edgeAngles = edgeAngles;
     return true;
 }
 
@@ -361,7 +451,8 @@ QJsonObject JsonStore::toJson(const FileData& data)
 LoadResult JsonStore::fromJson(const QJsonObject& root)
 {
     // 版本受理区间 [1, currentVersion]：低版本存档宽容迁移（v1 无 prepAreas 节点 →
-    // 空列表；v2 prepAreas 无 color 键 → 派生态 invalid），高于当前版本（未来存档）拒载
+    // 空列表；v2 prepAreas 无 color 键 → 派生态 invalid；v3 无 paths 节点 → 空列表；
+    // v4 对象无道具字段 → 缺省），高于当前版本（未来存档）拒载
     const QJsonValue versionValue = root.value(QStringLiteral("version"));
     if (!versionValue.isDouble() || versionValue.toDouble() < 1.0
         || versionValue.toDouble() > static_cast<double>(currentVersion)) {

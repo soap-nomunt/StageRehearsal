@@ -67,6 +67,9 @@
 // 主视口绘制前帧幽灵（不透明）+ 后帧幽灵（0.4）+ 直线白线（幽灵不参与命中/
 // 选中/显示值驱动）；加选不相邻/跨对象帧 = 替换为新单选；清除路径全覆盖
 // （点空白/单选他帧/轨道选中变化/播放开始/fileReplaced/命令提交后防御）。
+// 阶段13 追加：舞台道具基础对象 + 存档 v5——Create 对话框道具可选、创建
+// 默认矩形道具、Inspector 道具页（scale 绑定 delta 同步/standable/实际尺寸/
+// 编辑形状占位禁用）、拖拽/框选/复制粘贴/打帧/双帧幽灵/删除/撤销重做全链路。
 //
 // 运行（Git Bash，项目根目录）：
 //   QT_QPA_PLATFORM=offscreen ./build/Debug/InteractionSelfTest.exe
@@ -740,7 +743,7 @@ int main(int argc, char* argv[])
     CHECK(tree->topLevelItemCount() == 2, "Hierarchy 树同步（只剩两顶层行）");
     CHECK(ids().isEmpty(), "级联删除后选中清空");
 
-    // ---- Create 对话框：四项（舞台道具禁用），空对象可选 ----
+    // ---- Create 对话框：四项（舞台道具阶段13 起可选），空对象可选 ----
     // （对话框本身非模态实例化即可验证；两处右键菜单的模态弹出走手测）
     {
         CreateObjectDialog dialog;
@@ -751,8 +754,10 @@ int main(int argc, char* argv[])
                   && radios.at(2)->text() == QStringLiteral("空对象")
                   && radios.at(3)->text() == QStringLiteral("舞台道具"),
               "四项文案：演员/屏风/空对象/舞台道具");
-        CHECK(!radios.at(3)->isEnabled(), "舞台道具禁用");
+        CHECK(radios.at(3)->isEnabled(), "舞台道具可选（阶段13 解禁）");
         CHECK(dialog.selectedType() == ObjectType::Actor, "默认选中演员");
+        radios.at(3)->setChecked(true);
+        CHECK(dialog.selectedType() == ObjectType::Prop, "舞台道具可选中");
         radios.at(2)->setChecked(true);
         CHECK(dialog.selectedType() == ObjectType::Group, "空对象可选");
     }
@@ -2297,7 +2302,7 @@ int main(int argc, char* argv[])
         auto* runtime13 = w13.findChild<RuntimeData*>();
         auto* view13 = qobject_cast<StageView*>(w13.centralWidget());
         auto* scene13 = qobject_cast<StageScene*>(view13->scene());
-        CHECK(runtime13->fileData().version == 4, "阶段12：示例存档版本号 v4");
+        CHECK(runtime13->fileData().version == 5, "阶段13：示例存档版本号 v5");
         CHECK(runtime13->fileData().prepAreas.size() == 2, "阶段10：示例存档含 2 个准备区");
         CHECK(runtime13->fileData().prepAreas.at(0).color == QColor(QStringLiteral("#d35400")),
               "阶段11：示例存档 prep-001 显式独立色");
@@ -2435,8 +2440,8 @@ int main(int argc, char* argv[])
         QFile f2(v2Path);
         CHECK(f2.open(QIODevice::ReadOnly), "阶段10：回读另存文件");
         const QJsonDocument doc = QJsonDocument::fromJson(f2.readAll());
-        CHECK(doc.object().value(QStringLiteral("version")).toDouble() == 4.0,
-              "阶段12：保存后版本号升为 v4");
+        CHECK(doc.object().value(QStringLiteral("version")).toDouble() == 5.0,
+              "阶段13：保存后版本号升为 v5");
         CHECK(doc.object().contains(QStringLiteral("prepAreas"))
                   && doc.object().value(QStringLiteral("prepAreas")).isArray(),
               "阶段10：保存后恒写 prepAreas 数组（空也写 []）");
@@ -2466,7 +2471,7 @@ int main(int argc, char* argv[])
         QTest::qWaitForWindowExposed(&w15);
         CHECK(w15.openFromPath(v2LegacyPath), "阶段11：v2 旧存档（prepAreas 无 color 键）打开成功");
         auto* runtime15 = w15.findChild<RuntimeData*>();
-        CHECK(runtime15->fileData().version == 4, "阶段12：v2 迁移后版本号升为 v4");
+        CHECK(runtime15->fileData().version == 5, "阶段13：v2 迁移后版本号升为 v5");
         CHECK(runtime15->fileData().prepAreas.size() == 2, "阶段11：v2 迁移后准备区保留");
         bool allDerived15 = true;
         for (const PrepAreaData& area : runtime15->fileData().prepAreas)
@@ -2487,8 +2492,8 @@ int main(int argc, char* argv[])
         QFile f3(v3Path);
         CHECK(f3.open(QIODevice::ReadOnly), "阶段11：回读另存文件");
         const QJsonObject root15 = QJsonDocument::fromJson(f3.readAll()).object();
-        CHECK(root15.value(QStringLiteral("version")).toDouble() == 4.0,
-              "阶段12：另存后版本号升为 v4");
+        CHECK(root15.value(QStringLiteral("version")).toDouble() == 5.0,
+              "阶段13：另存后版本号升为 v5");
         const QJsonArray areas15 = root15.value(QStringLiteral("prepAreas")).toArray();
         bool allHaveColorKey = areas15.size() == 2;
         for (const QJsonValue& entry : areas15)
@@ -2532,7 +2537,7 @@ int main(int argc, char* argv[])
         QTest::qWaitForWindowExposed(&w17b);
         CHECK(w17b.openFromPath(v3LegacyPath), "阶段12：v3 旧存档（无 paths 键）打开成功");
         auto* runtime17b = w17b.findChild<RuntimeData*>();
-        CHECK(runtime17b->fileData().version == 4, "阶段12：v3 迁移后版本号升为 v4");
+        CHECK(runtime17b->fileData().version == 5, "阶段13：v3 迁移后版本号升为 v5");
         CHECK(runtime17b->fileData().paths.isEmpty(),
               "阶段12：v3 迁移后无路径（全部直线）");
         // 视觉零变化：段中点插值 = 直线匀速中点（与无路径旧行为逐位一致）
@@ -2549,8 +2554,8 @@ int main(int argc, char* argv[])
         QFile f4(v4Path);
         CHECK(f4.open(QIODevice::ReadOnly), "阶段12：回读另存文件");
         const QJsonObject root17b = QJsonDocument::fromJson(f4.readAll()).object();
-        CHECK(root17b.value(QStringLiteral("version")).toDouble() == 4.0,
-              "阶段12：另存后版本号升为 v4");
+        CHECK(root17b.value(QStringLiteral("version")).toDouble() == 5.0,
+              "阶段13：另存后版本号升为 v5");
         CHECK(root17b.contains(QStringLiteral("paths"))
                   && root17b.value(QStringLiteral("paths")).isArray(),
               "阶段12：另存后恒写 paths 数组（空也写 []）");
@@ -3005,6 +3010,218 @@ int main(int argc, char* argv[])
 
         // 清理哨兵：还原吸附设置
         runtime17->settings().setGridSnapEnabled(true);
+    }
+
+    // ==================== 阶段13：舞台道具基础对象（创建/Inspector/全链路） ====================
+    {
+        MainWindow w18;
+        w18.show();
+        QTest::qWaitForWindowExposed(&w18);
+        auto* core18 = w18.findChild<EditorCore*>();
+        auto* runtime18 = w18.findChild<RuntimeData*>();
+        auto* view18 = qobject_cast<StageView*>(w18.centralWidget());
+        auto* scene18 = qobject_cast<StageScene*>(view18->scene());
+        auto* timeline18 = w18.findChild<TimelineWidget*>();
+        auto* canvas18 = w18.findChild<QWidget*>(QStringLiteral("timelineCanvas"));
+        auto* keyButton18 = w18.findChild<QPushButton*>(QStringLiteral("keyframeButton"));
+        QWidget* vp18 = view18->viewport();
+        CHECK(core18 && runtime18 && view18 && scene18 && timeline18 && canvas18
+                  && keyButton18,
+              "阶段13：组件装配完整");
+        const auto posOf18 = [view18](const QPointF& scenePos) {
+            return view18->mapFromScene(scenePos);
+        };
+
+        // ---- 创建道具（右键视口空白 → Create → 选道具 → 确定，模态经 QTimer 驱动） ----
+        QTimer::singleShot(200, [] { // 右键菜单：选第一项 Create...
+            if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                menu->setActiveAction(menu->actions().first());
+                QTest::keyClick(menu, Qt::Key_Return);
+            }
+        });
+        QTimer::singleShot(600, [] { // Create 对话框：选"舞台道具" → 确定
+            if (auto* dialog =
+                    qobject_cast<CreateObjectDialog*>(QApplication::activeModalWidget())) {
+                dialog->findChild<QRadioButton*>(QStringLiteral("propRadio"))
+                    ->setChecked(true);
+                dialog->accept();
+            }
+        });
+        QContextMenuEvent createEvt(QContextMenuEvent::Mouse, posOf18(QPointF(500.0, 600.0)),
+                                    view18->mapToGlobal(posOf18(QPointF(500.0, 600.0))));
+        QApplication::sendEvent(vp18, &createEvt);
+        CHECK(runtime18->fileData().objects.size() == 1, "阶段13：右键菜单创建道具成功");
+        const ObjectData prop18 = runtime18->fileData().objects.first(); // 值拷贝：后续提交会整体替换 FileData，引用会悬空
+        CHECK(prop18.type == ObjectType::Prop && prop18.id == QStringLiteral("prop-001")
+                  && prop18.name == QStringLiteral("道具1"),
+              "阶段13：道具类型/id/自动命名（道具1）");
+        CHECK(!prop18.shape.has_value() && prop18.scaleX == 1.0 && prop18.scaleY == 1.0
+                  && prop18.standable,
+              "阶段13：新道具缺省（默认矩形 / scale 1 / 可供站立）");
+        CHECK(near(prop18.transform.x, 500.0) && near(prop18.transform.y, 600.0),
+              "阶段13：道具落在右键位置");
+        const QString propId18 = prop18.id;
+
+        // 模态对话框关闭后 offscreen 窗口失去激活：快捷键路由前重新激活（既有先例）
+        w18.activateWindow();
+        QTest::qWaitForWindowActive(&w18);
+
+        // ---- 渲染与命中：点在多边形内 ----
+        CHECK(scene18->itemById(propId18) != nullptr, "阶段13：道具图元进视口");
+        CHECK(scene18->topStageItemAt(QPointF(500.0, 600.0)) != nullptr
+                  && scene18->topStageItemAt(QPointF(500.0, 600.0))->objectId() == propId18,
+              "阶段13：命中 = 点在多边形内（默认矩形内命中）");
+        CHECK(scene18->topStageItemAt(QPointF(570.0, 600.0)) == nullptr,
+              "阶段13：矩形外不命中（默认半边长 50cm）");
+        CHECK(near(scene18->itemById(propId18)->boundingRect().width(), 104.0, 1.0),
+              "阶段13：默认矩形渲染 100cm + 描边余量");
+
+        // ---- Inspector 道具页：回显 + scale 绑定语义 + standable + 占位按钮 ----
+        core18->selection()->select(propId18);
+        auto* propScaleX18 = w18.findChild<QDoubleSpinBox*>(QStringLiteral("propScaleXSpin"));
+        auto* propScaleY18 = w18.findChild<QDoubleSpinBox*>(QStringLiteral("propScaleYSpin"));
+        auto* propLink18 = w18.findChild<QPushButton*>(QStringLiteral("propScaleLinkButton"));
+        auto* propStandable18 = w18.findChild<QCheckBox*>(QStringLiteral("propStandableCheck"));
+        auto* propEditShape18 = w18.findChild<QPushButton*>(QStringLiteral("propEditShapeButton"));
+        auto* propActualSize18 = w18.findChild<QLabel*>(QStringLiteral("propActualSizeLabel"));
+        auto* propNameEdit18 = w18.findChild<QLineEdit*>(QStringLiteral("propNameEdit"));
+        CHECK(propScaleX18 && propScaleY18 && propLink18 && propStandable18
+                  && propEditShape18 && propActualSize18 && propNameEdit18,
+              "阶段13：Inspector 道具页控件装配完整");
+        CHECK(propNameEdit18->isVisible() && propScaleX18->isVisible(),
+              "阶段13：选中道具切道具页");
+        CHECK(near(propScaleX18->value(), 1.0, 0.01)
+                  && near(propScaleY18->value(), 1.0, 0.01) && propStandable18->isChecked(),
+              "阶段13：道具页回显缺省值");
+        CHECK(propActualSize18->text().contains(QStringLiteral("100.0")),
+              "阶段13：只读实际尺寸（默认 100×100cm）");
+        CHECK(!propEditShape18->isEnabled(), "阶段13：编辑形状按钮占位禁用");
+
+        // scale 不绑定：只改 X
+        propScaleX18->setValue(2.0); // valueChanged → 命令提交
+        CHECK(near(core18->findObject(propId18)->scaleX, 2.0, 0.001)
+                  && near(core18->findObject(propId18)->scaleY, 1.0, 0.001),
+              "阶段13：不绑定时只改 X");
+        CHECK(propActualSize18->text().contains(QStringLiteral("200.0")),
+              "阶段13：实际尺寸随 scale 刷新（宽 200cm）");
+        CHECK(near(scene18->itemById(propId18)->boundingRect().width(), 204.0, 1.0),
+              "阶段13：道具图元随 scale 重建（宽 200cm）");
+
+        // 绑定切换：不改当前值；改 Y +0.5 → X 同步 +0.5（delta 同步，非等比）
+        propLink18->setChecked(true);
+        CHECK(near(core18->findObject(propId18)->scaleX, 2.0, 0.001)
+                  && near(core18->findObject(propId18)->scaleY, 1.0, 0.001),
+              "阶段13：绑定切换本身不改值");
+        propScaleY18->setValue(1.5); // Y: 1.0 → 1.5（+0.5）
+        CHECK(near(core18->findObject(propId18)->scaleY, 1.5, 0.001)
+                  && near(core18->findObject(propId18)->scaleX, 2.5, 0.001),
+              "阶段13：绑定后 Y 增 0.5 → X 同步增 0.5（delta 同步）");
+
+        // standable 复选框
+        propStandable18->setChecked(false);
+        CHECK(!core18->findObject(propId18)->standable, "阶段13：standable 提交（可供站立=否）");
+        propStandable18->setChecked(true);
+
+        // ---- 重名拒绝 ----
+        propNameEdit18->setText(QStringLiteral("道具1x")); // 先改合法名
+        QTest::keyClick(propNameEdit18, Qt::Key_Return);
+        CHECK(core18->findObject(propId18)->name == QStringLiteral("道具1x"),
+              "阶段13：道具改名生效");
+        propNameEdit18->setText(QStringLiteral("道具1x")); // 与自身同名 → 无变更
+        QTest::keyClick(propNameEdit18, Qt::Key_Return);
+        CHECK(core18->findObject(propId18)->name == QStringLiteral("道具1x"),
+              "阶段13：同名不重复提交");
+
+        // ---- 朝向：数值框改朝向（道具无朝向手柄） ----
+        auto* propRotSpin18 = w18.findChild<QDoubleSpinBox*>(QStringLiteral("propRotSpin"));
+        // 注意：场景图元随每次提交全量重建，itemById 指针不得跨提交持有（现取现用）
+        CHECK(propRotSpin18 && scene18->itemById(propId18) != nullptr, "阶段13：朝向行存在");
+        CHECK(!scene18->itemById(propId18)->hitRotationHandle(
+                  scene18->itemById(propId18)->mapToScene(QPointF(0.0, 60.0))),
+              "阶段13：道具无朝向手柄（hitRotationHandle 恒 false）");
+
+        // ---- 拖拽移动（打帧，游标时刻语义） ----
+        core18->selection()->select(propId18);
+        runtime18->settings().setGridSnapEnabled(false);
+        const QPointF propBefore(prop18.transform.x, prop18.transform.y);
+        QTest::mousePress(vp18, Qt::LeftButton, Qt::NoModifier, posOf18(QPointF(500.0, 600.0)));
+        QTest::mouseMove(vp18, posOf18(QPointF(520.0, 620.0)));
+        QTest::mouseRelease(vp18, Qt::LeftButton, Qt::NoModifier, posOf18(QPointF(550.0, 650.0)));
+        runtime18->settings().setGridSnapEnabled(true);
+        {
+            const ObjectData* moved = core18->findObject(propId18);
+            CHECK(moved->keyframes.size() == 1 && near(moved->keyframes.first().x, 550.0, 1.0)
+                      && near(moved->keyframes.first().y, 650.0, 1.0),
+                  "阶段13：道具拖拽打帧（游标时刻语义，静态 transform 不变）");
+            CHECK(moved->transform.x == propBefore.x(), "阶段13：道具静态 transform 不变");
+        }
+        core18->undo(); // 撤销拖拽打帧（回空关键帧，后续链路从干净状态起步）
+        CHECK(core18->findObject(propId18)->keyframes.isEmpty(), "阶段13：undo 撤销道具打帧");
+
+        // ---- 打帧按钮：道具可打帧 ----
+        core18->selection()->select(propId18);
+        CHECK(keyButton18->isEnabled(), "阶段13：道具打帧按钮可用");
+        keyButton18->click();
+        CHECK(core18->findObject(propId18)->keyframes.size() == 1,
+              "阶段13：打帧按钮给道具打帧");
+        core18->undo();
+
+        // ---- 双帧幽灵（道具）：时间轴 Ctrl 加选相邻两帧 ----
+        core18->upsertKeyframe(propId18, Keyframe { 1.0, 500.0, 600.0, 0.0 });
+        core18->upsertKeyframe(propId18, Keyframe { 3.0, 600.0, 600.0, 45.0 });
+        CHECK(timeline18->canvasPosFor(propId18, 1.0).x() > 0,
+              "阶段13：道具轨道进入时间轴");
+        QTest::mouseClick(canvas18, Qt::LeftButton, Qt::NoModifier,
+                          timeline18->canvasPosFor(propId18, 1.0));
+        QTest::mouseClick(canvas18, Qt::LeftButton, Qt::ControlModifier,
+                          timeline18->canvasPosFor(propId18, 3.0));
+        CHECK(core18->activeSegment().has_value(), "阶段13：道具双帧态就绪");
+        {
+            int propGhosts = 0;
+            for (QGraphicsItem* item : scene18->items()) {
+                if (auto* stageItem = dynamic_cast<StageObjectItem*>(item)) {
+                    if (stageItem->isGhost() && stageItem->objectId() == propId18)
+                        ++propGhosts;
+                }
+            }
+            CHECK(propGhosts == 2, "阶段13：道具双帧幽灵（前帧不透明 + 后帧 0.4）");
+        }
+
+        // ---- 复制/粘贴：静态属性深拷贝（shape/scale/standable） ----
+        core18->selection()->select(propId18);
+        core18->copySelection();
+        CHECK(core18->pasteClipboard(), "阶段13：道具粘贴成功");
+        {
+            const ObjectData& pasted = runtime18->fileData().objects.last();
+            CHECK(pasted.id != propId18 && pasted.name == QStringLiteral("道具1x2"),
+                  "阶段13：粘贴新 id + 唯一名");
+            CHECK(near(pasted.scaleX, 2.5, 0.001) && near(pasted.scaleY, 1.5, 0.001)
+                      && pasted.standable && !pasted.shape.has_value(),
+                  "阶段13：粘贴深拷贝静态属性（scale/standable/shape）");
+            CHECK(pasted.keyframes.size() == 2, "阶段13：粘贴深拷贝关键帧");
+        }
+
+        // ---- 删除 + 撤销/重做全链路 ----
+        const int objectCount18 = runtime18->fileData().objects.size();
+        core18->selection()->select(propId18);
+        vp18->setFocus();
+        QTest::keyClick(vp18, Qt::Key_Delete);
+        CHECK(core18->findObject(propId18) == nullptr, "阶段13：Delete 删除道具");
+        CHECK(runtime18->fileData().objects.size() == objectCount18 - 1,
+              "阶段13：删除提交回数据层");
+        core18->undo();
+        CHECK(core18->findObject(propId18) != nullptr, "阶段13：undo 恢复道具");
+        core18->redo();
+        CHECK(core18->findObject(propId18) == nullptr, "阶段13：redo 再删道具");
+
+        // 截图存档人工复核（缩放+旋转的道具 + Inspector 道具页）
+        core18->undo();
+        core18->selection()->select(propId18);
+        view18->fitInView(QRectF(300.0, 400.0, 500.0, 400.0), Qt::KeepAspectRatio);
+        view18->grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage13-prop-viewport.png")));
+        w18.grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage13-prop-inspector.png")));
     }
 
     out() << Qt::endl;

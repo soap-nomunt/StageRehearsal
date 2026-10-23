@@ -1,9 +1,10 @@
 #pragma once
 
 // 存档读写（QJsonDocument）。任何损坏输入只返回错误枚举，不崩溃。
-// 根节点 version 字段在加载时检查：受理区间 [1, kFileDataVersion]（当前 4），
+// 根节点 version 字段在加载时检查：受理区间 [1, kFileDataVersion]（当前 5），
 // 低版本存档宽容迁移（v1 无 prepAreas 节点 → 空列表；v2 prepAreas 无 color 键
-// → 派生态 invalid；v3 无 paths 节点 → 空列表），高版本拒载。
+// → 派生态 invalid；v3 无 paths 节点 → 空列表；v4 对象无道具字段 → 缺省），
+// 高版本拒载。
 
 #include "DataTypes.h"
 

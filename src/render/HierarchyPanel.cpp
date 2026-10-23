@@ -228,8 +228,6 @@ void HierarchyPanel::rebuildList()
     const QList<ObjectData>& objects = m_editorCore->runtimeData()->fileData().objects;
     // 第一遍：按文件顺序建行（DFS 不变式保证兄弟顺序正确）
     for (const ObjectData& object : objects) {
-        if (object.type == ObjectType::Prop)
-            continue; // 道具仅预留占位，不出现
         auto* item = new QTreeWidgetItem;
         item->setText(0, object.name); // 与 Inspector 一致
         item->setData(0, Qt::UserRole, object.id);

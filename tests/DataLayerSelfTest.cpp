@@ -323,12 +323,23 @@ void testEditorCore()
         CHECK(screen.color == AppSettings::defaultPalette().at(1), "调色板轮转取色");
     }
 
-    // 道具占位：拒绝创建
-    CHECK(!core.createObject(ObjectType::Prop, QPointF(0.0, 0.0)), "道具创建被拒绝（占位禁用）");
-    CHECK(runtime.fileData().objects.size() == 2, "道具未进入数据");
+    // 道具（阶段13 解禁）：创建成功——shape 缺省（默认 100×100 矩形）、scale=1、
+    // standable=true、调色板轮转、自动命名"道具1"并入全局重名
+    CHECK(core.createObject(ObjectType::Prop, QPointF(-300.0, 400.0)),
+          "道具创建成功（阶段13 解禁）");
+    CHECK(runtime.fileData().objects.size() == 3, "道具经命令提交回数据层");
+    {
+        const ObjectData prop = runtime.fileData().objects.at(2);
+        CHECK(prop.id == QStringLiteral("prop-001") && prop.name == QStringLiteral("道具1"),
+              "道具自动生成 id 与唯一名（道具1）");
+        CHECK(!prop.shape.has_value() && prop.scaleX == 1.0 && prop.scaleY == 1.0
+                  && prop.standable, "道具缺省：默认矩形 + scale 1 + 可供站立");
+        CHECK(prop.color == AppSettings::defaultPalette().at(2), "道具调色板轮转取色");
+    }
 
     // 名字唯一性（演员与屏风统一校验，排除自身）
     CHECK(core.isNameTaken(QStringLiteral("角色1")), "重名检测命中");
+    CHECK(core.isNameTaken(QStringLiteral("道具1")), "道具名并入全局重名检测");
     CHECK(!core.isNameTaken(QStringLiteral("角色1"), actorId), "重名检测排除自身");
     CHECK(!core.setObjectName(screenId, QStringLiteral("角色1")), "重名拒绝");
     CHECK(!core.setObjectName(actorId, QStringLiteral("  ")), "空名拒绝");
@@ -340,9 +351,9 @@ void testEditorCore()
     core.copySelection();
     CHECK(core.clipboardHasContent(), "复制进内部剪贴板");
     CHECK(core.pasteClipboard(), "粘贴成功（默认偏移）");
-    CHECK(runtime.fileData().objects.size() == 3, "粘贴经命令提交回数据层");
+    CHECK(runtime.fileData().objects.size() == 4, "粘贴经命令提交回数据层");
     {
-        const ObjectData pasted = runtime.fileData().objects.at(2);
+        const ObjectData pasted = runtime.fileData().objects.at(3);
         CHECK(pasted.id != actorId, "粘贴生成新 id");
         CHECK(pasted.transform.x == 120.0 && pasted.transform.y == 220.0,
               "粘贴默认偏移 (x+20, y+20)");
@@ -353,7 +364,7 @@ void testEditorCore()
     // 右键位置粘贴：落在指定点
     CHECK(core.pasteClipboard(QPointF(-50.0, -60.0)), "右键位置粘贴成功");
     {
-        const ObjectData pastedAt = runtime.fileData().objects.at(3);
+        const ObjectData pastedAt = runtime.fileData().objects.at(4);
         CHECK(pastedAt.transform.x == -50.0 && pastedAt.transform.y == -60.0,
               "右键粘贴落在鼠标位置");
     }
@@ -379,7 +390,7 @@ void testEditorCore()
 
     // 删除：选中态随 fileDataChanged 自动剔除
     CHECK(core.deleteSelection(), "删除选中对象");
-    CHECK(runtime.fileData().objects.size() == 3 && core.findObject(actorId) == nullptr,
+    CHECK(runtime.fileData().objects.size() == 4 && core.findObject(actorId) == nullptr,
           "删除提交回数据层");
     CHECK(core.selection()->isEmpty(), "删除后选中态自动剔除");
 }
@@ -657,7 +668,7 @@ void testEditorCoreGroupReparent()
               && core.findObject(actor1)->parentId == group1,
           "拒绝的 reparent 不产生任何变更");
 
-    // Prop 不出现：注入一个道具对象，双向拒绝
+    // 道具 reparent 规则（阶段13）：可作子、不可作父
     {
         FileData injected = runtime.fileData();
         ObjectData prop;
@@ -666,10 +677,17 @@ void testEditorCoreGroupReparent()
         prop.name = QStringLiteral("道具1");
         injected.objects.append(prop);
         runtime.commitFileData(injected);
-        CHECK(!core.reparent({ QStringLiteral("prop-001") }, group1, 0), "Prop 拖动被拒绝");
-        CHECK(!core.reparent({ actor1 }, QStringLiteral("prop-001"), 0), "拖到 Prop 之下被拒绝");
+        CHECK(core.reparent({ QStringLiteral("prop-001") }, group1, 0),
+              "道具可作子（阶段13 放宽）");
+        CHECK(core.findObject(QStringLiteral("prop-001"))->parentId == group1,
+              "道具 reparent 落数据 parentId");
+        CHECK(!core.reparent({ actor1 }, QStringLiteral("prop-001"), 0),
+              "道具不可作父（保留拒绝）");
         FileData cleaned = runtime.fileData();
-        cleaned.objects.removeLast();
+        for (int i = cleaned.objects.size() - 1; i >= 0; --i) {
+            if (cleaned.objects.at(i).id == QStringLiteral("prop-001"))
+                cleaned.objects.removeAt(i);
+        }
         runtime.commitFileData(cleaned);
     }
 
@@ -1482,20 +1500,20 @@ void testCorruptedFile(QTemporaryDir& dir)
     CHECK(!arrayResult.ok() && arrayResult.error == LoadError::Parse, "根节点为数组返回 LoadError::Parse");
 }
 
-// 阶段12 改写：版本受理区间 [1, 4]——v5（未来版本）拒载；v1 存档（无 prepAreas
+// 阶段13 改写：版本受理区间 [1, 5]——v6（未来版本）拒载；v1 存档（无 prepAreas
 // 节点）宽容迁移为空列表；v2 存档（prepAreas 元素无 color 键）宽容迁移为派生态；
-// v3 存档（无 paths 节点）宽容迁移为空路径列表（仿 testParentGroupJson 的剥字段
-// 兼容模式）
+// v3 存档（无 paths 节点）宽容迁移为空路径列表；v4 存档（对象无道具字段）宽容
+// 缺省（仿 testParentGroupJson 的剥字段兼容模式）
 void testVersionMismatch(QTemporaryDir& dir)
 {
     QJsonObject root = JsonStore::toJson(FileData::createDefault());
 
-    root[QStringLiteral("version")] = 5;
-    const QString futurePath = dir.filePath(QStringLiteral("v5.json"));
+    root[QStringLiteral("version")] = 6;
+    const QString futurePath = dir.filePath(QStringLiteral("v6.json"));
     writeTextFile(futurePath, QJsonDocument(root).toJson());
     const LoadResult futureResult = JsonStore::load(futurePath);
     CHECK(!futureResult.ok() && futureResult.error == LoadError::UnsupportedVersion,
-          "version=5（高于当前）返回 LoadError::UnsupportedVersion");
+          "version=6（高于当前）返回 LoadError::UnsupportedVersion");
 
     root[QStringLiteral("version")] = 0;
     const QString lowPath = dir.filePath(QStringLiteral("v0.json"));
@@ -2288,6 +2306,194 @@ void testPaths()
     }
 }
 
+// 阶段13：舞台道具——ObjectData 道具字段（shape/scaleX/scaleY/standable）：
+// v5 往返逐字段（仅 type=prop 写入道具字段）/ v4 迁移宽容缺省 / 非法形状宽容
+// 回退默认矩形（<3 顶点/零长边/edgeAngles 长度不符）/ operator== 传导（漏字段
+// = dirty 失效）/ EditorCore::setPropScale/setPropStandable 命令快照与撤销
+void testPropFields(QTemporaryDir& dir)
+{
+    // ---- v5 往返逐字段 + 仅 type=prop 写入 ----
+    FileData data = FileData::createDefault();
+    ObjectData actor;
+    actor.id = QStringLiteral("actor-001");
+    actor.type = ObjectType::Actor;
+    actor.name = QStringLiteral("张三");
+    actor.transform = { 100.0, 100.0, 0.0 };
+    data.objects.append(actor);
+
+    ObjectData prop;
+    prop.id = QStringLiteral("prop-001");
+    prop.type = ObjectType::Prop;
+    prop.name = QStringLiteral("道具1");
+    prop.color = QColor(QStringLiteral("#b0814e"));
+    prop.transform = { -300.0, 400.0, 45.0 };
+    prop.scaleX = 2.0;
+    prop.scaleY = 0.5;
+    prop.standable = false;
+    // 三角形 + 一条弧边（局部坐标逆时针）
+    prop.shape = PropShape { { { -60.0, -40.0 }, { -60.0, 40.0 }, { 70.0, 0.0 } },
+                             { 0.0, 30.0, 0.0 } };
+    data.objects.append(prop);
+
+    const QString path = dir.filePath(QStringLiteral("propfields.json"));
+    CHECK(JsonStore::save(path, data).ok, "道具字段：保存成功");
+    const LoadResult loaded = JsonStore::load(path);
+    CHECK(loaded.ok(), "道具字段：读回成功：" + loaded.message);
+    if (loaded.ok()) {
+        CHECK(loaded.data == data, "道具字段 v5 往返逐字段一致（FileData 整体）");
+        CHECK(loaded.data.objects.at(1).shape == prop.shape,
+              "道具 shape 往返一致（顶点 + 弧边角度）");
+        CHECK(!loaded.data.objects.at(1).standable
+                  && loaded.data.objects.at(1).scaleX == 2.0
+                  && loaded.data.objects.at(1).scaleY == 0.5,
+              "道具 scale/standable 往返一致");
+        CHECK(!loaded.data.objects.at(0).shape.has_value(),
+              "非道具对象不写也不读道具字段");
+    }
+    {
+        // JSON 层面：道具对象含 scaleX/shape 键；演员对象不含（仅 prop 写入）
+        const QJsonObject root = JsonStore::toJson(data);
+        const QJsonArray objects = root.value(QStringLiteral("objects")).toArray();
+        const QJsonObject propJson = objects.at(1).toObject();
+        CHECK(propJson.contains(QStringLiteral("scaleX"))
+                  && propJson.contains(QStringLiteral("shape"))
+                  && propJson.contains(QStringLiteral("standable")),
+              "道具字段仅 type=prop 时写入");
+        CHECK(!objects.at(0).toObject().contains(QStringLiteral("scaleX")),
+              "演员对象不写道具字段");
+    }
+
+    // ---- v4 迁移宽容缺省：道具对象无道具字段 → 全部缺省 ----
+    {
+        QJsonObject root = JsonStore::toJson(FileData::createDefault());
+        root[QStringLiteral("version")] = 4;
+        QJsonArray objects;
+        QJsonObject legacyProp;
+        legacyProp[QStringLiteral("id")] = QStringLiteral("prop-001");
+        legacyProp[QStringLiteral("type")] = QStringLiteral("prop");
+        legacyProp[QStringLiteral("name")] = QStringLiteral("旧道具");
+        QJsonObject transform;
+        transform[QStringLiteral("x")] = 10.0;
+        transform[QStringLiteral("y")] = 20.0;
+        transform[QStringLiteral("rotation")] = 0.0;
+        legacyProp[QStringLiteral("transform")] = transform;
+        objects.append(legacyProp);
+        root[QStringLiteral("objects")] = objects;
+        const LoadResult result = JsonStore::fromJson(root);
+        CHECK(result.ok(), "v4 存档（道具无道具字段）加载成功：" + result.message);
+        if (result.ok()) {
+            const ObjectData& migrated = result.data.objects.first();
+            CHECK(migrated.scaleX == 1.0 && migrated.scaleY == 1.0
+                      && migrated.standable && !migrated.shape.has_value(),
+                  "v4 迁移：道具字段宽容缺省（scale 1 / 可供站立 / 默认矩形）");
+        }
+    }
+
+    // ---- 非法形状宽容回退默认矩形 ----
+    {
+        const auto shapeJson = [](const QJsonArray& vertices,
+                                  const QJsonArray& angles) {
+            QJsonObject root = JsonStore::toJson(FileData::createDefault());
+            QJsonObject prop;
+            prop[QStringLiteral("id")] = QStringLiteral("prop-001");
+            prop[QStringLiteral("type")] = QStringLiteral("prop");
+            prop[QStringLiteral("name")] = QStringLiteral("道具1");
+            QJsonObject transform;
+            transform[QStringLiteral("x")] = 0.0;
+            transform[QStringLiteral("y")] = 0.0;
+            transform[QStringLiteral("rotation")] = 0.0;
+            prop[QStringLiteral("transform")] = transform;
+            QJsonObject shape;
+            shape[QStringLiteral("vertices")] = vertices;
+            shape[QStringLiteral("edgeAngles")] = angles;
+            prop[QStringLiteral("shape")] = shape;
+            QJsonArray objects;
+            objects.append(prop);
+            root[QStringLiteral("objects")] = objects;
+            return JsonStore::fromJson(root);
+        };
+        const auto vertex = [](double x, double y) {
+            QJsonObject v;
+            v[QStringLiteral("x")] = x;
+            v[QStringLiteral("y")] = y;
+            return QJsonValue(v);
+        };
+        // <3 顶点
+        QJsonArray twoVertices { vertex(0.0, 0.0), vertex(10.0, 0.0) };
+        QJsonArray twoAngles { 0.0, 0.0 };
+        const LoadResult few = shapeJson(twoVertices, twoAngles);
+        CHECK(few.ok() && !few.data.objects.first().shape.has_value(),
+              "非法形状回退：<3 顶点 → 默认矩形");
+        // 零长边（相邻顶点间距 ≤ 1cm）
+        QJsonArray zeroEdge { vertex(0.0, 0.0), vertex(0.5, 0.0), vertex(10.0, 10.0) };
+        QJsonArray threeAngles { 0.0, 0.0, 0.0 };
+        const LoadResult zeroLen = shapeJson(zeroEdge, threeAngles);
+        CHECK(zeroLen.ok() && !zeroLen.data.objects.first().shape.has_value(),
+              "非法形状回退：零长边 → 默认矩形");
+        // edgeAngles 长度不符
+        QJsonArray tri { vertex(-50.0, -50.0), vertex(-50.0, 50.0), vertex(50.0, 0.0) };
+        QJsonArray oneAngle { 0.0 };
+        const LoadResult mismatch = shapeJson(tri, oneAngle);
+        CHECK(mismatch.ok() && !mismatch.data.objects.first().shape.has_value(),
+              "非法形状回退：edgeAngles 长度不符 → 默认矩形");
+        // 合法形状保留
+        const LoadResult valid = shapeJson(tri, threeAngles);
+        CHECK(valid.ok() && valid.data.objects.first().shape.has_value()
+                  && valid.data.objects.first().shape->vertices.size() == 3,
+              "合法形状解析保留");
+    }
+
+    // ---- operator== 传导（漏字段 = dirty 跟踪静默失效） ----
+    {
+        FileData a = FileData::createDefault();
+        ObjectData prop;
+        prop.id = QStringLiteral("prop-001");
+        prop.type = ObjectType::Prop;
+        prop.name = QStringLiteral("道具1");
+        a.objects.append(prop);
+        FileData b = a;
+        CHECK(a == b, "道具字段：相同数据相等");
+        b.objects[0].scaleX = 2.0;
+        CHECK(a != b, "道具字段：scaleX 差异传导到 operator==");
+        b = a;
+        b.objects[0].standable = false;
+        CHECK(a != b, "道具字段：standable 差异传导到 operator==");
+        b = a;
+        b.objects[0].shape = defaultPropShape();
+        CHECK(a != b, "道具字段：shape 差异传导到 operator==");
+    }
+
+    // ---- EditorCore 命令：setPropScale / setPropStandable ----
+    {
+        RuntimeData runtime;
+        EditorCore core(&runtime);
+        CHECK(core.createObject(ObjectType::Prop, QPointF(0.0, 0.0)), "道具命令测试：创建道具");
+        const QString propId = runtime.fileData().objects.last().id;
+
+        CHECK(core.setPropScale(propId, 2.0, 0.5), "setPropScale 生效");
+        const ObjectData* propData = core.findObject(propId);
+        CHECK(propData->scaleX == 2.0 && propData->scaleY == 0.5, "setPropScale 提交回数据层");
+        CHECK(core.canUndo(), "setPropScale 入撤销栈");
+        CHECK(!core.setPropScale(propId, 0.0, 1.0), "setPropScale 拒绝越界（< 0.1）");
+        CHECK(!core.setPropScale(propId, 1.0, 200.0), "setPropScale 拒绝越界（> 100）");
+        CHECK(!core.setPropScale(propId, 2.0, 0.5), "setPropScale 无变更不提交");
+        CHECK(core.undo() && core.findObject(propId)->scaleX == 1.0,
+              "setPropScale undo 恢复");
+
+        CHECK(core.setPropStandable(propId, false), "setPropStandable 生效");
+        CHECK(!core.findObject(propId)->standable, "setPropStandable 提交回数据层");
+        CHECK(core.undo() && core.findObject(propId)->standable,
+              "setPropStandable undo 恢复");
+
+        CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)), "道具命令测试：创建演员");
+        const QString actorId = runtime.fileData().objects.last().id;
+        CHECK(!core.setPropScale(actorId, 2.0, 2.0), "setPropScale 非道具拒绝");
+        CHECK(!core.setPropStandable(actorId, false), "setPropStandable 非道具拒绝");
+        while (core.canUndo())
+            core.undo(); // 清理哨兵
+    }
+}
+
 // 阶段8：AppSettings 最近使用列表（MRU）语义 + RuntimeData 记录时机。
 // MRU 哨兵在用例开头/结尾清理，避免残留影响下次运行
 void testRecentFiles(QTemporaryDir& dir)
@@ -2435,6 +2641,7 @@ int main(int argc, char* argv[])
     testStageSettings();
     testPrepAreas();
     testPaths();
+    testPropFields(dir);
     testUndoStack(dir);
     testUndoRedoSequence();
     testRecentFiles(dir);

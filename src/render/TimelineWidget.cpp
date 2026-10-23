@@ -39,9 +39,14 @@ constexpr double kArrowStepSec = 0.5;      // ←/→ 方向键步进步长（�
 
 QString groupTitle(ObjectType type, int count)
 {
-    return QStringLiteral("%1（%2）")
-        .arg(type == ObjectType::Actor ? QStringLiteral("演员") : QStringLiteral("屏风"))
-        .arg(count);
+    QString stem;
+    switch (type) {
+    case ObjectType::Actor:  stem = QStringLiteral("演员"); break;
+    case ObjectType::Screen: stem = QStringLiteral("屏风"); break;
+    case ObjectType::Prop:   stem = QStringLiteral("道具"); break; // 阶段13
+    case ObjectType::Group:  stem = QStringLiteral("空对象"); break; // 不出现在轨道区
+    }
+    return QStringLiteral("%1（%2）").arg(stem).arg(count);
 }
 
 } // namespace
@@ -93,7 +98,7 @@ public:
         m_rows.append(Row { Row::Kind::Labels, ObjectType::Actor, QString(), QString(), 0, TimelineWidget::kLabelRowH });
 
         const FileData& file = m_core->runtimeData()->fileData();
-        for (ObjectType type : { ObjectType::Actor, ObjectType::Screen }) {
+        for (ObjectType type : { ObjectType::Actor, ObjectType::Screen, ObjectType::Prop }) {
             int count = 0;
             for (const ObjectData& object : file.objects)
                 count += object.type == type ? 1 : 0;

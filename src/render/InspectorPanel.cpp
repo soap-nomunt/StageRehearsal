@@ -9,6 +9,7 @@
 #include "data/RuntimeData.h"
 
 #include <QColorDialog>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
@@ -197,18 +198,81 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
     }
     m_stack->addWidget(m_pathPage); // 第五页（index 4）
 
+    // ---- 道具页（阶段13，第六页 index 5）：名称/位置/朝向/颜色 + 缩放 + 绑定 +
+    // 可供站立 + 编辑形状（占位禁用）+ 只读实际尺寸 ----
+    m_propPage = new QWidget(this);
+    auto* propForm = new QFormLayout(m_propPage);
+    m_propName = new QLineEdit(m_propPage);
+    m_propX = makeCmSpinBox(m_propPage, -99999.9, 99999.9, 10.0);
+    m_propY = makeCmSpinBox(m_propPage, -99999.9, 99999.9, 10.0);
+    m_propRotation = makeRotationSpinBox(m_propPage);
+    m_propColor = new QPushButton(m_propPage);
+    m_propScaleX = new QDoubleSpinBox(m_propPage);
+    m_propScaleY = new QDoubleSpinBox(m_propPage);
+    for (QDoubleSpinBox* spin : { m_propScaleX, m_propScaleY }) {
+        spin->setRange(0.1, 100.0); // 倍数制：1 = 无缩放；范围 0.1~100 仅正值
+        spin->setDecimals(1);
+        spin->setSingleStep(0.1);
+        spin->setSuffix(QStringLiteral(" ×"));
+        spin->setKeyboardTracking(false);
+    }
+    m_propScaleLink = new QPushButton(QStringLiteral("绑定 X/Y"), m_propPage);
+    m_propScaleLink->setObjectName(QStringLiteral("propScaleLinkButton"));
+    m_propScaleLink->setCheckable(true);
+    m_propScaleLink->setToolTip(
+        QStringLiteral("绑定后修改一方，另一方同步增减相同增量（切换本身不改值）"));
+    m_propStandable = new QCheckBox(QStringLiteral("可供站立"), m_propPage);
+    m_propStandable->setObjectName(QStringLiteral("propStandableCheck"));
+    m_propStandable->setToolTip(
+        QStringLiteral("取消勾选后，该道具成为阻挡物：路径编辑不允许穿过它"));
+    m_propEditShape = new QPushButton(QStringLiteral("编辑形状…"), m_propPage);
+    m_propEditShape->setObjectName(QStringLiteral("propEditShapeButton"));
+    m_propEditShape->setEnabled(false); // 形状编辑器属后续任务，本轮占位禁用
+    m_propEditShape->setToolTip(QStringLiteral("形状编辑器将在后续版本提供"));
+    m_propActualSize = new QLabel(m_propPage);
+    m_propActualSize->setObjectName(QStringLiteral("propActualSizeLabel"));
+    m_propActualSize->setStyleSheet(QStringLiteral("color: #888888;"));
+
+    m_propName->setObjectName(QStringLiteral("propNameEdit"));
+    m_propX->setObjectName(QStringLiteral("propXSpin"));
+    m_propY->setObjectName(QStringLiteral("propYSpin"));
+    m_propRotation->setObjectName(QStringLiteral("propRotSpin"));
+    m_propColor->setObjectName(QStringLiteral("propColorButton"));
+    m_propScaleX->setObjectName(QStringLiteral("propScaleXSpin"));
+    m_propScaleY->setObjectName(QStringLiteral("propScaleYSpin"));
+    m_propColor->setFixedHeight(24);
+    propForm->addRow(QStringLiteral("道具名"), m_propName);
+    propForm->addRow(QStringLiteral("位置 X"), m_propX);
+    propForm->addRow(QStringLiteral("位置 Y"), m_propY);
+    propForm->addRow(QStringLiteral("朝向"), m_propRotation);
+    propForm->addRow(QStringLiteral("颜色"), m_propColor);
+    propForm->addRow(QStringLiteral("缩放 X"), m_propScaleX);
+    propForm->addRow(QStringLiteral("缩放 Y"), m_propScaleY);
+    propForm->addRow(QString(), m_propScaleLink);
+    propForm->addRow(QStringLiteral("站立"), m_propStandable);
+    propForm->addRow(QStringLiteral("形状"), m_propEditShape);
+    propForm->addRow(QStringLiteral("实际尺寸"), m_propActualSize);
+    m_stack->addWidget(m_propPage);
+
     // 修改立即生效：提交即走命令
     connect(m_actorName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
     connect(m_screenName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
     connect(m_groupName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
+    connect(m_propName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
     for (QDoubleSpinBox* spin : { m_actorX, m_actorY, m_actorRotation,
-                                  m_screenX, m_screenY, m_screenRotation }) {
+                                  m_screenX, m_screenY, m_screenRotation,
+                                  m_propX, m_propY, m_propRotation }) {
         connect(spin, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitTransform);
     }
     connect(m_screenW, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitSize);
     connect(m_screenH, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitSize);
     connect(m_actorColor, &QPushButton::clicked, this, &InspectorPanel::pickColor);
     connect(m_screenColor, &QPushButton::clicked, this, &InspectorPanel::pickColor);
+    connect(m_propColor, &QPushButton::clicked, this, &InspectorPanel::pickColor);
+    // 阶段13：道具缩放/站立提交
+    connect(m_propScaleX, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitPropScale);
+    connect(m_propScaleY, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitPropScale);
+    connect(m_propStandable, &QCheckBox::toggled, this, &InspectorPanel::commitPropStandable);
     // 阶段12：路径页提交（一切走命令入撤销栈；currentIndexChanged 同 spin 的
     // valueChanged 模式：程序回显走 m_updating 屏蔽，用户切换才提交）
     connect(m_pathType, &QComboBox::currentIndexChanged,
@@ -267,6 +331,24 @@ void InspectorPanel::refresh()
         // 空对象：纯组织节点，只有名称表单
         m_groupName->setText(object->name);
         m_stack->setCurrentIndex(3);
+    } else if (object->type == ObjectType::Prop) {
+        // 道具（阶段13）：位置/朝向显示当前时刻插值结果；缩放/站立/尺寸为静态属性
+        const Transform shown =
+            TimelinePlayer::interpolate(*object, m_editorCore->runtimeData()->fileData().paths,
+                                        m_editorCore->timelinePlayer()->currentTime());
+        m_propName->setText(object->name);
+        m_propX->setValue(shown.x);
+        m_propY->setValue(shown.y);
+        m_propRotation->setValue(normalizedRotation(shown.rotation));
+        updateColorButton(m_propColor, object->color);
+        m_propScaleX->setValue(object->scaleX);
+        m_propScaleY->setValue(object->scaleY);
+        m_propStandable->setChecked(object->standable);
+        m_propActualSize->setText(
+            QStringLiteral("宽 %1 cm × 深 %2 cm")
+                .arg(propShapeWidth(*object) * object->scaleX, 0, 'f', 1)
+                .arg(propShapeDepth(*object) * object->scaleY, 0, 'f', 1));
+        m_stack->setCurrentWidget(m_propPage);
     } else if (object->type == ObjectType::Screen) {
         // 位置/朝向显示当前时刻插值结果（显示值与数据值分离；阶段12 起含路径）
         const Transform shown =
@@ -304,6 +386,7 @@ void InspectorPanel::commitName()
         return;
     QLineEdit* edit = object->type == ObjectType::Screen ? m_screenName
         : object->type == ObjectType::Group              ? m_groupName
+        : object->type == ObjectType::Prop               ? m_propName
                                                          : m_actorName;
     const QString name = edit->text().trimmed();
     if (name == object->name)
@@ -332,6 +415,10 @@ void InspectorPanel::commitTransform()
         value.x = m_screenX->value();
         value.y = m_screenY->value();
         value.rotation = m_screenRotation->value();
+    } else if (object->type == ObjectType::Prop) {
+        value.x = m_propX->value();
+        value.y = m_propY->value();
+        value.rotation = m_propRotation->value();
     } else {
         value.x = m_actorX->value();
         value.y = m_actorY->value();
@@ -500,4 +587,60 @@ void InspectorPanel::commitPathPointT()
     m_editorCore->setPathPointT(activePath.segment.objectId, activePath.segment.from,
                                 activePath.segment.to, activePath.pointIndex,
                                 m_pathPointT->value());
+}
+
+// ---- 阶段13：道具页 ----
+
+void InspectorPanel::commitPropScale()
+{
+    if (m_updating)
+        return;
+    const ObjectData* object = currentObject();
+    if (!object || object->type != ObjectType::Prop)
+        return;
+    double targetX = m_propScaleX->value();
+    double targetY = m_propScaleY->value();
+    if (m_propScaleLink->isChecked()) {
+        // 绑定（决策4）：一方改动多少、另一方同步增减同一增量（非等比锁比值）；
+        // 切换开关本身不改值
+        auto* source = qobject_cast<QDoubleSpinBox*>(sender());
+        if (source == m_propScaleX)
+            targetY = qBound(0.1, object->scaleY + (targetX - object->scaleX), 100.0);
+        else if (source == m_propScaleY)
+            targetX = qBound(0.1, object->scaleX + (targetY - object->scaleY), 100.0);
+    }
+    m_editorCore->setPropScale(object->id, targetX, targetY); // 无变更不入栈
+}
+
+void InspectorPanel::commitPropStandable()
+{
+    if (m_updating)
+        return;
+    const ObjectData* object = currentObject();
+    if (!object || object->type != ObjectType::Prop)
+        return;
+    m_editorCore->setPropStandable(object->id, m_propStandable->isChecked());
+}
+
+// 未缩放形状包围盒宽/深（缺省 = 默认 100×100 矩形）
+double InspectorPanel::propShapeWidth(const ObjectData& object) const
+{
+    const PropShape shape = object.shape.value_or(defaultPropShape());
+    double lo = 0.0, hi = 0.0;
+    for (const PathPoint& v : shape.vertices) {
+        lo = qMin(lo, v.x);
+        hi = qMax(hi, v.x);
+    }
+    return hi - lo;
+}
+
+double InspectorPanel::propShapeDepth(const ObjectData& object) const
+{
+    const PropShape shape = object.shape.value_or(defaultPropShape());
+    double lo = 0.0, hi = 0.0;
+    for (const PathPoint& v : shape.vertices) {
+        lo = qMin(lo, v.y);
+        hi = qMax(hi, v.y);
+    }
+    return hi - lo;
 }

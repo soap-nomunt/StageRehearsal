@@ -16,14 +16,14 @@ CreateObjectDialog::CreateObjectDialog(QWidget* parent)
     m_actorRadio = new QRadioButton(QStringLiteral("演员"), this);
     m_screenRadio = new QRadioButton(QStringLiteral("屏风"), this);
     m_groupRadio = new QRadioButton(QStringLiteral("空对象"), this);
-    auto* propRadio = new QRadioButton(QStringLiteral("舞台道具"), this);
-    propRadio->setEnabled(false); // 道具仅预留占位，暂时禁用
+    m_propRadio = new QRadioButton(QStringLiteral("舞台道具"), this); // 阶段13 起可选
+    m_propRadio->setObjectName(QStringLiteral("propRadio")); // 供自测定位
     m_actorRadio->setChecked(true);
 
     layout->addWidget(m_actorRadio);
     layout->addWidget(m_screenRadio);
     layout->addWidget(m_groupRadio);
-    layout->addWidget(propRadio);
+    layout->addWidget(m_propRadio);
 
     auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
@@ -33,6 +33,8 @@ CreateObjectDialog::CreateObjectDialog(QWidget* parent)
 
 ObjectType CreateObjectDialog::selectedType() const
 {
+    if (m_propRadio->isChecked())
+        return ObjectType::Prop;
     if (m_groupRadio->isChecked())
         return ObjectType::Group;
     return m_screenRadio->isChecked() ? ObjectType::Screen : ObjectType::Actor;

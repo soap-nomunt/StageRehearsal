@@ -90,7 +90,7 @@ public:
     bool isNameTaken(const QString& name, const QString& excludeId = QString()) const;
 
     // ---- 创建 / 剪贴板 ----
-    bool createObject(ObjectType type, const QPointF& posCm);   // 道具占位：返回 false；
+    bool createObject(ObjectType type, const QPointF& posCm);   // 阶段13 起道具可创建；
                                                                 // 空对象忽略 posCm、落在顶层
     void copySelection();                                       // 深拷贝进内部剪贴板（含子树）
     bool pasteClipboard(const std::optional<QPointF>& atCm = std::nullopt); // 无位置 → 偏移 (20,20)
@@ -144,6 +144,10 @@ public:
     bool setObjectName(const QString& id, const QString& name); // 空名/重名拒绝
     bool setObjectColor(const QString& id, const QColor& color);
     bool setScreenSize(const QString& id, const QSizeF& sizeCm);
+    // 道具（阶段13）：缩放两值一次提交（xy 绑定语义由 Inspector 组装）；
+    // 范围 0.1~100 仅正值，越界拒绝；standable 切换（false = 阻挡路径编辑）
+    bool setPropScale(const QString& id, double scaleX, double scaleY);
+    bool setPropStandable(const QString& id, bool standable);
 
     // 舞台设置（阶段7 起直改直提交）：宽/深必须 > 0，非法尺寸拒绝；无变更不提交
     // （返回 false）。不入撤销栈——撤销栈只覆盖主视口/Hierarchy/Inspector/时间轴
