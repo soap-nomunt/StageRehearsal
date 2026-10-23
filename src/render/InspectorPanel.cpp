@@ -1,6 +1,7 @@
 #include "InspectorPanel.h"
 
 #include "KeyframePrompt.h"
+#include "dialogs/ShapeEditDialog.h"
 #include "business/EditorCore.h"
 #include "business/PathCommands.h" // resolveSegmentEndpoints
 #include "business/PathGeometry.h"
@@ -227,8 +228,8 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
         QStringLiteral("取消勾选后，该道具成为阻挡物：路径编辑不允许穿过它"));
     m_propEditShape = new QPushButton(QStringLiteral("编辑形状…"), m_propPage);
     m_propEditShape->setObjectName(QStringLiteral("propEditShapeButton"));
-    m_propEditShape->setEnabled(false); // 形状编辑器属后续任务，本轮占位禁用
-    m_propEditShape->setToolTip(QStringLiteral("形状编辑器将在后续版本提供"));
+    m_propEditShape->setToolTip(
+        QStringLiteral("弹窗编辑道具形状（多边形顶点拖拽/边弧调整/基础形状模板）"));
     m_propActualSize = new QLabel(m_propPage);
     m_propActualSize->setObjectName(QStringLiteral("propActualSizeLabel"));
     m_propActualSize->setStyleSheet(QStringLiteral("color: #888888;"));
@@ -273,6 +274,7 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
     connect(m_propScaleX, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitPropScale);
     connect(m_propScaleY, &QDoubleSpinBox::valueChanged, this, &InspectorPanel::commitPropScale);
     connect(m_propStandable, &QCheckBox::toggled, this, &InspectorPanel::commitPropStandable);
+    connect(m_propEditShape, &QPushButton::clicked, this, &InspectorPanel::editPropShape);
     // 阶段12：路径页提交（一切走命令入撤销栈；currentIndexChanged 同 spin 的
     // valueChanged 模式：程序回显走 m_updating 屏蔽，用户切换才提交）
     connect(m_pathType, &QComboBox::currentIndexChanged,
@@ -620,6 +622,18 @@ void InspectorPanel::commitPropStandable()
     if (!object || object->type != ObjectType::Prop)
         return;
     m_editorCore->setPropStandable(object->id, m_propStandable->isChecked());
+}
+
+void InspectorPanel::editPropShape()
+{
+    const ObjectData* object = currentObject();
+    if (!object || object->type != ObjectType::Prop)
+        return;
+    // 模态编辑本地副本；确定 → 一条命令入撤销栈；取消 → 零变更
+    ShapeEditDialog dialog(object->shape.value_or(defaultPropShape()), this);
+    if (dialog.exec() != QDialog::Accepted)
+        return;
+    m_editorCore->setPropShape(object->id, dialog.resultShape());
 }
 
 // 未缩放形状包围盒宽/深（缺省 = 默认 100×100 矩形）

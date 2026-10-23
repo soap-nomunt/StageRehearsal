@@ -2494,6 +2494,133 @@ void testPropFields(QTemporaryDir& dir)
     }
 }
 
+// 阶段13 任务2：形状编辑器——合围校验纯函数全分支（合法直线/合法弧边/圆形模板/
+// 顶点不足/零长边/直线边自交/弧边鼓出自交/共线退化）+ SetPropShapeCommand
+// （快照旧 shape/绕向归一/类型拒绝/undo）；编辑器交互由 InteractionSelfTest 覆盖
+void testShapeEditing()
+{
+    using PathGeometry::validatePropShape;
+
+    // ---- 合法：默认矩形（直边） ----
+    CHECK(validatePropShape(defaultPropShape()).valid, "合围校验：默认矩形合法");
+
+    // ---- 合法：弧边（四顶点矩形一条边鼓出） ----
+    {
+        PropShape arcRect { { { -50.0, -50.0 }, { -50.0, 50.0 }, { 50.0, 50.0 },
+                              { 50.0, -50.0 } },
+                            { 0.0, 60.0, 0.0, 0.0 } };
+        CHECK(validatePropShape(arcRect).valid, "合围校验：一条弧边鼓出合法");
+    }
+
+    // ---- 合法：圆形模板（2 顶点 + 两条 180° 弧边） ----
+    {
+        const PropShape circle { { { 50.0, 0.0 }, { -50.0, 0.0 } },
+                                 { -180.0, -180.0 } };
+        CHECK(validatePropShape(circle).valid, "合围校验：圆形模板（2 顶点两弧边）合法");
+    }
+
+    // ---- 非法：顶点不足 ----
+    CHECK(!validatePropShape(PropShape { { { 0.0, 0.0 } }, { 0.0 } }).valid,
+          "合围校验：顶点不足（1 个）");
+    // 2 顶点但直边（退化：往返重合）
+    CHECK(!validatePropShape(PropShape { { { -50.0, 0.0 }, { 50.0, 0.0 } },
+                                         { 0.0, 0.0 } })
+               .valid,
+          "合围校验：2 顶点直边退化");
+
+    // ---- 非法：零长边（相邻顶点间距 ≤ 1cm） ----
+    {
+        const PropShape zeroEdge { { { 0.0, 0.0 }, { 0.5, 0.0 }, { 10.0, 10.0 } },
+                                   { 0.0, 0.0, 0.0 } };
+        const PathGeometry::ShapeValidity result = validatePropShape(zeroEdge);
+        CHECK(!result.valid && result.message.contains(QStringLiteral("零")),
+              "合围校验：零长边（红字指明边）");
+    }
+
+    // ---- 非法：直线边自交（蝴蝶结四顶点） ----
+    {
+        const PropShape bowtie { { { -50.0, -50.0 }, { 50.0, 50.0 }, { 50.0, -50.0 },
+                                   { -50.0, 50.0 } },
+                                 { 0.0, 0.0, 0.0, 0.0 } };
+        const PathGeometry::ShapeValidity result = validatePropShape(bowtie);
+        CHECK(!result.valid && result.message.contains(QStringLiteral("相交")),
+              "合围校验：直线边自交（蝴蝶结），红字指明首对相交边");
+    }
+
+    // ---- 非法：弧边鼓出导致的自交（直线边不相交、鼓出后相交，采样必须捕获） ----
+    {
+        // 扁矩形下边为大角度弧（鼓出向上穿过顶边）：直边时合法
+        const PropShape bulgeCross { { { -100.0, -20.0 }, { -100.0, 20.0 },
+                                       { 100.0, 20.0 }, { 100.0, -20.0 } },
+                                     { 0.0, 170.0, 0.0, 0.0 } }; // 边2（底边）大弧鼓入
+        const PropShape straightOk { bulgeCross.vertices, { 0.0, 0.0, 0.0, 0.0 } };
+        CHECK(validatePropShape(straightOk).valid,
+              "合围校验对照：同顶点直边合法（排除误报）");
+        const PathGeometry::ShapeValidity result = validatePropShape(bulgeCross);
+        CHECK(!result.valid && result.message.contains(QStringLiteral("相交")),
+              "合围校验：弧边鼓出导致的自交被采样捕获");
+    }
+
+    // ---- 非法：共线退化（三顶点共线，面积 ≈ 0） ----
+    {
+        const PropShape collinear { { { 0.0, 0.0 }, { 50.0, 0.0 }, { 100.0, 0.0 } },
+                                    { 0.0, 0.0, 0.0 } };
+        CHECK(!validatePropShape(collinear).valid, "合围校验：共线退化");
+    }
+
+    // ---- SetPropShapeCommand：快照/绕向归一/类型拒绝/undo ----
+    {
+        RuntimeData runtime;
+        EditorCore core(&runtime);
+        CHECK(core.createObject(ObjectType::Prop, QPointF(0.0, 0.0)),
+              "形状命令测试：创建道具");
+        const QString propId = runtime.fileData().objects.last().id;
+
+        // 逆时针三角（负面积绕向，写入原样保留）
+        const PropShape ccwTri { { { -50.0, 40.0 }, { 50.0, 40.0 }, { 0.0, -60.0 } },
+                                 { 0.0, 0.0, 0.0 } };
+        CHECK(core.setPropShape(propId, ccwTri), "setPropShape 生效");
+        CHECK(core.findObject(propId)->shape == ccwTri, "setPropShape 提交回数据层");
+        CHECK(core.canUndo(), "setPropShape 入撤销栈");
+
+        // 顺时针输入 → 绕向归一（写入存档前统一逆时针）：顶点序反转、边角度取反重排
+        PropShape cwTri { { { -50.0, 40.0 }, { 0.0, -60.0 }, { 50.0, 40.0 } },
+                          { 30.0, 0.0, 0.0 } }; // 顺时针 + 边0 带 30° 弧
+        CHECK(core.setPropShape(propId, cwTri), "setPropShape 顺时针输入生效");
+        const PropShape& stored = *core.findObject(propId)->shape;
+        CHECK(PathGeometry::signedArea(
+                  [&stored] {
+                      QList<QPointF> pts;
+                      for (const PathPoint& v : stored.vertices)
+                          pts.append(QPointF(v.x, v.y));
+                      return pts;
+                  }())
+                  < 0.0,
+              "setPropShape 绕向归一：写入为逆时针（y 向下负面积）");
+        // 归一后几何一致：归一化前后的采样轮廓重合（同一点集）
+        PropShape normalized = cwTri;
+        PathGeometry::normalizePropShapeWinding(normalized);
+        CHECK(normalized.vertices == stored.vertices
+                  && normalized.edgeAngles == stored.edgeAngles,
+              "setPropShape 绕向归一与 PathGeometry 实现一致");
+
+        // 类型拒绝
+        CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)),
+              "形状命令测试：创建演员");
+        CHECK(!core.setPropShape(runtime.fileData().objects.last().id, ccwTri),
+              "setPropShape 非道具拒绝");
+
+        // undo 逐级恢复（栈：创建道具 / 首次形状 / 顺时针形状 / 创建演员）
+        CHECK(core.undo(), "undo 撤销创建演员");
+        CHECK(core.undo(), "undo 撤销顺时针形状");
+        CHECK(core.findObject(propId)->shape == ccwTri, "undo 回退到首次形状");
+        CHECK(core.undo(), "undo 撤销首次形状");
+        CHECK(!core.findObject(propId)->shape.has_value(), "undo 恢复缺省形状");
+        while (core.canUndo())
+            core.undo(); // 清理哨兵（此后不再使用 propId）
+    }
+}
+
 // 阶段8：AppSettings 最近使用列表（MRU）语义 + RuntimeData 记录时机。
 // MRU 哨兵在用例开头/结尾清理，避免残留影响下次运行
 void testRecentFiles(QTemporaryDir& dir)
@@ -2642,6 +2769,7 @@ int main(int argc, char* argv[])
     testPrepAreas();
     testPaths();
     testPropFields(dir);
+    testShapeEditing();
     testUndoStack(dir);
     testUndoRedoSequence();
     testRecentFiles(dir);

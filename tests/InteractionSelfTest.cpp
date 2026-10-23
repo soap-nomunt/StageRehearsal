@@ -89,6 +89,7 @@
 #include "render/StartDialog.h"
 #include "render/TimelineWidget.h"
 #include "render/dialogs/CreateObjectDialog.h"
+#include "render/dialogs/ShapeEditDialog.h"
 
 #include <QApplication>
 #include <QAction>
@@ -3095,7 +3096,7 @@ int main(int argc, char* argv[])
               "阶段13：道具页回显缺省值");
         CHECK(propActualSize18->text().contains(QStringLiteral("100.0")),
               "阶段13：只读实际尺寸（默认 100×100cm）");
-        CHECK(!propEditShape18->isEnabled(), "阶段13：编辑形状按钮占位禁用");
+        CHECK(propEditShape18->isEnabled(), "阶段13：编辑形状按钮启用（任务2 接线）");
 
         // scale 不绑定：只改 X
         propScaleX18->setValue(2.0); // valueChanged → 命令提交
@@ -3222,6 +3223,360 @@ int main(int argc, char* argv[])
             QDir::temp().absoluteFilePath(QStringLiteral("stage13-prop-viewport.png")));
         w18.grab().save(
             QDir::temp().absoluteFilePath(QStringLiteral("stage13-prop-inspector.png")));
+    }
+
+    // ============ 阶段13 任务2：形状编辑器（模态 QTimer 驱动） ============
+    {
+        MainWindow w19;
+        w19.show();
+        QTest::qWaitForWindowExposed(&w19);
+        auto* core19 = w19.findChild<EditorCore*>();
+        auto* runtime19 = w19.findChild<RuntimeData*>();
+        auto* view19 = qobject_cast<StageView*>(w19.centralWidget());
+        auto* scene19 = qobject_cast<StageScene*>(view19->scene());
+        CHECK(core19 && runtime19 && view19 && scene19, "阶段13：编辑器用例组件装配完整");
+
+        CHECK(core19->createObject(ObjectType::Prop, QPointF(0.0, 0.0)),
+              "阶段13：编辑器用例：创建道具");
+        const QString propId19 = runtime19->fileData().objects.last().id;
+        core19->selection()->select(propId19);
+        auto* editShapeButton19 =
+            w19.findChild<QPushButton*>(QStringLiteral("propEditShapeButton"));
+        CHECK(editShapeButton19 && editShapeButton19->isEnabled(),
+              "阶段13：编辑形状按钮启用（任务2 接线）");
+
+        // 形状采样（与 PropItem/ShapeCanvas 同一实现）：会话间几何比较用
+        const auto sampleShape = [](const PropShape& shape) {
+            QList<QPointF> outline;
+            const int n = shape.vertices.size();
+            for (int i = 0; i < n; ++i) {
+                const PathPoint& a = shape.vertices.at(i);
+                const PathPoint& b = shape.vertices.at((i + 1) % n);
+                const double angle =
+                    i < shape.edgeAngles.size() ? shape.edgeAngles.at(i) : 0.0;
+                const QList<QPointF> leg = PathGeometry::sampleLeg(
+                    QPointF(a.x, a.y), QPointF(b.x, b.y), angle);
+                for (int j = (outline.isEmpty() ? 0 : 1); j < leg.size(); ++j)
+                    outline.append(leg.at(j));
+            }
+            return outline;
+        };
+        // 点到折线最大偏差（双向取大）
+        const auto maxDeviation = [](const QList<QPointF>& a, const QList<QPointF>& b) {
+            double worst = 0.0;
+            for (const QPointF& p : a) {
+                double best = 1e18;
+                for (int j = 0; j + 1 < b.size(); ++j) {
+                    const QPointF ab = b.at(j + 1) - b.at(j);
+                    const double len2 = ab.x() * ab.x() + ab.y() * ab.y();
+                    double f = 0.0;
+                    if (len2 > 0.0) {
+                        f = qBound(0.0,
+                                   ((p.x() - b.at(j).x()) * ab.x()
+                                    + (p.y() - b.at(j).y()) * ab.y()) / len2,
+                                   1.0);
+                    }
+                    const QPointF proj = b.at(j) + ab * f;
+                    best = qMin(best, std::hypot(p.x() - proj.x(), p.y() - proj.y()));
+                }
+                worst = qMax(worst, best);
+            }
+            return worst;
+        };
+
+        // ---- 会话 A：模板生成 + 边弧编辑 + 加点保形 + 拖点吸附 + 删点 + 确定提交 ----
+        {
+            QList<QPointF> outlineBeforeAdd; // 加点保形对照（会话内状态）
+            auto step = std::make_shared<int>(0);
+            auto drive = std::make_shared<std::function<void()>>();
+            *drive = [&, step, drive] {
+                auto* dialog =
+                    qobject_cast<ShapeEditDialog*>(QApplication::activeModalWidget());
+                if (!dialog)
+                    return;
+                auto* canvas = dialog->findChild<QWidget*>(QStringLiteral("shapeCanvas"));
+                auto* angleSpin =
+                    dialog->findChild<QDoubleSpinBox*>(QStringLiteral("edgeAngleSpin"));
+                switch (*step) {
+                case 0: // 模板巡视：矩形 4 / 圆形 2+双弧 / 梯形 4 / 三角形 3
+                    dialog->findChild<QPushButton*>(QStringLiteral("templateRectButton"))
+                        ->click();
+                    CHECK(dialog->currentShape().vertices.size() == 4,
+                          "阶段13：模板-矩形生成（4 顶点）");
+                    dialog->findChild<QPushButton*>(QStringLiteral("templateCircleButton"))
+                        ->click();
+                    CHECK(dialog->currentShape().vertices.size() == 2
+                              && qAbs(dialog->currentShape().edgeAngles.at(0)) == 180.0
+                              && qAbs(dialog->currentShape().edgeAngles.at(1)) == 180.0,
+                          "阶段13：模板-圆形生成（2 顶点 + 两条 180° 弧边）");
+                    dialog->findChild<QPushButton*>(
+                               QStringLiteral("templateTrapezoidButton"))
+                        ->click();
+                    CHECK(dialog->currentShape().vertices.size() == 4,
+                          "阶段13：模板-梯形生成");
+                    dialog->findChild<QPushButton*>(
+                               QStringLiteral("templateTriangleButton"))
+                        ->click();
+                    CHECK(dialog->currentShape().vertices.size() == 3,
+                          "阶段13：模板-三角形生成");
+                    dialog->findChild<QPushButton*>(QStringLiteral("templateRectButton"))
+                        ->click(); // 回矩形继续编辑
+                    break;
+                case 1: { // 点选边 0（左边）→ 圆心角行显示并回显 0
+                    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier,
+                                      dialog->canvasEdgePos(0));
+                    auto* edgeRow =
+                        dialog->findChild<QWidget*>(QStringLiteral("edgeAngleRow"));
+                    CHECK(edgeRow && edgeRow->isVisible(), "阶段13：点选边显示圆心角行");
+                    CHECK(near(angleSpin->value(), 0.0, 0.01), "阶段13：圆心角回显直边 0°");
+                    break;
+                }
+                case 2: // 边 0 改 60° 弧
+                    angleSpin->setValue(60.0);
+                    CHECK(qAbs(dialog->currentShape().edgeAngles.at(0) - 60.0) < 0.01,
+                          "阶段13：边弧编辑生效（边1 圆心角 60°）");
+                    break;
+                case 3: { // 右键边 0 中点 → 添加顶点（保形拆分）
+                    outlineBeforeAdd = sampleShape(dialog->currentShape());
+                    QTimer::singleShot(150, [] {
+                        if (auto* menu = qobject_cast<QMenu*>(
+                                QApplication::activePopupWidget())) {
+                            menu->setActiveAction(menu->actions().first()); // 添加顶点
+                            QTest::keyClick(menu, Qt::Key_Return);
+                        }
+                    });
+                    QContextMenuEvent evt(QContextMenuEvent::Mouse,
+                                          dialog->canvasEdgePos(0),
+                                          canvas->mapToGlobal(dialog->canvasEdgePos(0)));
+                    QApplication::sendEvent(canvas, &evt);
+                    CHECK(dialog->currentShape().vertices.size() == 5,
+                          "阶段13：右键边上添加顶点（5 顶点）");
+                    const QList<QPointF> after = sampleShape(dialog->currentShape());
+                    CHECK(maxDeviation(outlineBeforeAdd, after) < 0.5
+                              && maxDeviation(after, outlineBeforeAdd) < 0.5,
+                          "阶段13：加点保形（采样轮廓形状不变）");
+                    break;
+                }
+                case 4: { // 拖新顶点（自动选中）向 (0,0) → 吸附 (0,0)
+                    // 由两个已知顶点（v0=(-50,-50)、v1=(-50,0)）推导画布缩放
+                    const QPoint c0 = dialog->canvasVertexPos(0);
+                    const QPoint c1 = dialog->canvasVertexPos(1);
+                    const double scale = (c1 - c0).manhattanLength() / 50.0;
+                    const QPointF targetF = QPointF(c0) + QPointF(50.0, 50.0) * scale; // (0,0)
+                    const QPoint target(qRound(targetF.x()), qRound(targetF.y()));
+                    const QPoint from = dialog->canvasVertexPos(1);
+                    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, from);
+                    QTest::mouseMove(canvas, from + QPoint(20, 10)); // 越过阈值
+                    QTest::mouseMove(canvas, target);
+                    QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, target);
+                    const PathPoint& v = dialog->currentShape().vertices.at(1);
+                    CHECK(qAbs(v.x) < 1e-9 && qAbs(v.y) < 1e-9,
+                          "阶段13：顶点拖拽 50cm 网格吸附（落向 (0,0)）");
+                    break;
+                }
+                case 5: { // Delete 删选中顶点 → 回 4 顶点（矩形），边1 圆心角合并回 ≈60°
+                    QTest::keyClick(canvas, Qt::Key_Delete);
+                    CHECK(dialog->currentShape().vertices.size() == 4,
+                          "阶段13：Delete 删点回 4 顶点");
+                    CHECK(qAbs(dialog->currentShape().edgeAngles.at(0) - 60.0) < 0.5,
+                          "阶段13：删点后圆心角合并（θ₁+θ₂ ≈ 60°）");
+                    break;
+                }
+                case 6: { // 截图存档人工复核（矩形 + 边1 弧）→ 确定
+                    CHECK(dialog->currentShape().vertices.size() == 4,
+                          "阶段13：会话 A 确定前形状为 4 顶点");
+                    dialog->grab().save(QDir::temp().absoluteFilePath(
+                        QStringLiteral("stage13-shape-editor.png")));
+                    dialog->findChild<QPushButton*>(QStringLiteral("shapeOkButton"))
+                        ->click();
+                    break;
+                }
+                default:
+                    break;
+                }
+                ++*step;
+                if (*step <= 6)
+                    QTimer::singleShot(150, *drive);
+            };
+            QTimer::singleShot(200, *drive);
+            editShapeButton19->click(); // 模态 exec 由脚本驱动
+            const PropShape& stored = *core19->findObject(propId19)->shape;
+            CHECK(stored.vertices.size() == 4
+                      && qAbs(stored.edgeAngles.at(0) - 60.0) < 0.5,
+                  "阶段13：确定提交形状（一条命令入撤销栈）");
+            CHECK(core19->canUndo(), "阶段13：形状提交入撤销栈");
+            // PropItem 按新形状渲染：边1 弧向内鼓出 → 原矩形左缘中点被挤出形状
+            StageObjectItem* propItem19 = scene19->itemById(propId19);
+            CHECK(propItem19
+                      && !propItem19->shape().contains(
+                          propItem19->mapFromScene(QPointF(-49.0, 0.0))),
+                  "阶段13：确定后 PropItem 按新形状渲染（弧边鼓出处不再包含原矩形边缘点）");
+            core19->undo();
+            CHECK(!core19->findObject(propId19)->shape.has_value(),
+                  "阶段13：undo 恢复缺省矩形");
+            core19->redo();
+            CHECK(core19->findObject(propId19)->shape.has_value(),
+                  "阶段13：redo 恢复编辑形状");
+        }
+
+        // ---- 会话 B：非法态禁确定（蝴蝶结）→ 拖回合法 → 取消零变更 ----
+        {
+            auto step = std::make_shared<int>(0);
+            auto drive = std::make_shared<std::function<void()>>();
+            *drive = [&, step, drive] {
+                auto* dialog =
+                    qobject_cast<ShapeEditDialog*>(QApplication::activeModalWidget());
+                if (!dialog)
+                    return;
+                auto* canvas = dialog->findChild<QWidget*>(QStringLiteral("shapeCanvas"));
+                auto* okButton =
+                    dialog->findChild<QPushButton*>(QStringLiteral("shapeOkButton"));
+                auto* statusLabel =
+                    dialog->findChild<QLabel*>(QStringLiteral("shapeStatusLabel"));
+                switch (*step) {
+                case 0: { // 拖顶点 2 (50,50) → 场景 (-150,-60) 吸附 (-150,-50)：自交
+                    // 由 v0=(-50,-50)、v1=(-50,50) 推导画布缩放后换算目标像素
+                    const QPoint c0 = dialog->canvasVertexPos(0);
+                    const QPoint c1 = dialog->canvasVertexPos(1);
+                    const double scale = (c1 - c0).manhattanLength() / 100.0;
+                    const QPointF targetF =
+                        QPointF(c0) + QPointF(-100.0, -10.0) * scale; // 场景 (-150,-60)
+                    const QPoint target(qRound(targetF.x()), qRound(targetF.y()));
+                    const QPoint from = dialog->canvasVertexPos(2);
+                    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, from);
+                    QTest::mouseMove(canvas, from + QPoint(-60, 20)); // 越过阈值
+                    QTest::mouseMove(canvas, target);
+                    const PathPoint v2 = dialog->currentShape().vertices.at(2);
+                    CHECK(v2.x == -150.0 && v2.y == -50.0,
+                          QStringLiteral("阶段13：编辑器内拖点吸附（期望 (-150,-50)，"
+                                         "实际 (%1,%2)，v0 画布 (%3,%4)，v1 画布 (%5,%6)）")
+                              .arg(v2.x).arg(v2.y)
+                              .arg(c0.x()).arg(c0.y()).arg(c1.x()).arg(c1.y()));
+                    CHECK(!okButton->isEnabled()
+                              && statusLabel->text().contains(QStringLiteral("相交")),
+                          "阶段13：自交非法 → 确定禁用 + 红字指明相交");
+                    dialog->grab().save(QDir::temp().absoluteFilePath(
+                        QStringLiteral("stage13-shape-editor-invalid.png")));
+                    break;
+                }
+                case 1: { // 拖回 (50,50) → 恢复合法
+                    const QPoint c0 = dialog->canvasVertexPos(0);
+                    const QPoint c1 = dialog->canvasVertexPos(1);
+                    const double scale = (c1 - c0).manhattanLength() / 100.0;
+                    const QPointF targetF =
+                        QPointF(c0) + QPointF(100.0, 100.0) * scale; // 场景 (50,50)
+                    const QPoint target(qRound(targetF.x()), qRound(targetF.y()));
+                    const QPoint from = dialog->canvasVertexPos(2);
+                    QTest::mousePress(canvas, Qt::LeftButton, Qt::NoModifier, from);
+                    QTest::mouseMove(canvas, from + QPoint(60, 0));
+                    QTest::mouseMove(canvas, target);
+                    QTest::mouseRelease(canvas, Qt::LeftButton, Qt::NoModifier, target);
+                    CHECK(okButton->isEnabled(), "阶段13：拖回合法 → 确定恢复可用");
+                    break;
+                }
+                case 2: // 取消：零变更
+                    dialog->findChild<QPushButton*>(QStringLiteral("shapeCancelButton"))
+                        ->click();
+                    break;
+                default:
+                    break;
+                }
+                ++*step;
+                if (*step <= 2)
+                    QTimer::singleShot(150, *drive);
+            };
+            QTimer::singleShot(200, *drive);
+            editShapeButton19->click();
+            CHECK(core19->findObject(propId19)->shape.has_value()
+                      && core19->findObject(propId19)->shape->vertices.size() == 4,
+                  "阶段13：取消零变更（形状保持会话 A 提交结果）");
+        }
+
+        // ---- 会话 C：删点下限（3 顶点止） ----
+        {
+            auto step = std::make_shared<int>(0);
+            auto drive = std::make_shared<std::function<void()>>();
+            *drive = [&, step, drive] {
+                auto* dialog =
+                    qobject_cast<ShapeEditDialog*>(QApplication::activeModalWidget());
+                if (!dialog)
+                    return;
+                auto* canvas = dialog->findChild<QWidget*>(QStringLiteral("shapeCanvas"));
+                switch (*step) {
+                case 0: { // 右键边 2 中点 → 添加顶点（5 顶点，新点自动选中）
+                    QTimer::singleShot(150, [] {
+                        if (auto* menu = qobject_cast<QMenu*>(
+                                QApplication::activePopupWidget())) {
+                            menu->setActiveAction(menu->actions().first());
+                            QTest::keyClick(menu, Qt::Key_Return);
+                        }
+                    });
+                    QContextMenuEvent evt(QContextMenuEvent::Mouse,
+                                          dialog->canvasEdgePos(2),
+                                          canvas->mapToGlobal(dialog->canvasEdgePos(2)));
+                    QApplication::sendEvent(canvas, &evt);
+                    CHECK(dialog->currentShape().vertices.size() == 5,
+                          "阶段13：会话 C：加点到 5 顶点");
+                    break;
+                }
+                case 1: { // 右键新顶点 → 删除顶点（回 4）
+                    QTimer::singleShot(150, [] {
+                        if (auto* menu = qobject_cast<QMenu*>(
+                                QApplication::activePopupWidget())) {
+                            menu->setActiveAction(menu->actions().first()); // 删除顶点
+                            QTest::keyClick(menu, Qt::Key_Return);
+                        }
+                    });
+                    QContextMenuEvent evt(QContextMenuEvent::Mouse,
+                                          dialog->canvasVertexPos(3),
+                                          canvas->mapToGlobal(dialog->canvasVertexPos(3)));
+                    QApplication::sendEvent(canvas, &evt);
+                    CHECK(dialog->currentShape().vertices.size() == 4,
+                          "阶段13：右键顶点删除回 4 顶点");
+                    break;
+                }
+                case 2: { // Delete 删到 3 顶点
+                    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier,
+                                      dialog->canvasVertexPos(1));
+                    QTest::keyClick(canvas, Qt::Key_Delete);
+                    CHECK(dialog->currentShape().vertices.size() == 3,
+                          "阶段13：Delete 删点到 3 顶点");
+                    break;
+                }
+                case 3: { // 下限：3 顶点时 Delete 无效、菜单项禁用
+                    QTest::mouseClick(canvas, Qt::LeftButton, Qt::NoModifier,
+                                      dialog->canvasVertexPos(0));
+                    QTest::keyClick(canvas, Qt::Key_Delete);
+                    CHECK(dialog->currentShape().vertices.size() == 3,
+                          "阶段13：删点下限 3（Delete 无效）");
+                    QTimer::singleShot(150, [] {
+                        if (auto* menu = qobject_cast<QMenu*>(
+                                QApplication::activePopupWidget())) {
+                            CHECK(!menu->actions().first()->isEnabled(),
+                                  "阶段13：3 顶点时删除顶点菜单项禁用");
+                            menu->close();
+                        }
+                    });
+                    QContextMenuEvent evt(QContextMenuEvent::Mouse,
+                                          dialog->canvasVertexPos(0),
+                                          canvas->mapToGlobal(dialog->canvasVertexPos(0)));
+                    QApplication::sendEvent(canvas, &evt);
+                    break;
+                }
+                case 4:
+                    dialog->findChild<QPushButton*>(QStringLiteral("shapeCancelButton"))
+                        ->click();
+                    break;
+                default:
+                    break;
+                }
+                ++*step;
+                if (*step <= 4)
+                    QTimer::singleShot(150, *drive);
+            };
+            QTimer::singleShot(200, *drive);
+            editShapeButton19->click();
+        }
     }
 
     out() << Qt::endl;

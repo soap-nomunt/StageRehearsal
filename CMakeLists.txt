@@ -60,6 +60,8 @@ qt_add_executable(StageRehearsal
     src/render/InspectorPanel.cpp
     src/render/dialogs/CreateObjectDialog.h
     src/render/dialogs/CreateObjectDialog.cpp
+    src/render/dialogs/ShapeEditDialog.h
+    src/render/dialogs/ShapeEditDialog.cpp
     src/render/SettingsWindow.h
     src/render/SettingsWindow.cpp
     src/render/PrepAreaCanvas.h
@@ -129,6 +131,7 @@ add_executable(InteractionSelfTest
     src/render/InspectorPanel.cpp
     src/render/TimelineWidget.cpp
     src/render/dialogs/CreateObjectDialog.cpp
+    src/render/dialogs/ShapeEditDialog.cpp
     src/render/SettingsWindow.cpp
     src/render/PrepAreaCanvas.cpp
     src/render/StartDialog.cpp

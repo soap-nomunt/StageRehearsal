@@ -1,5 +1,7 @@
 #include "Commands.h"
 
+#include "PathGeometry.h"
+
 #include <QHash>
 #include <QSet>
 
@@ -369,4 +371,38 @@ void SetPropStandableCommand::revert(FileData& data)
 {
     if (ObjectData* object = findObject(data, m_id))
         object->standable = m_oldStandable;
+}
+
+// ---- SetPropShapeCommand（阶段13 任务2）----
+
+SetPropShapeCommand::SetPropShapeCommand(QString id, PropShape shape)
+    : m_id(std::move(id))
+    , m_shape(std::move(shape))
+{
+}
+
+void SetPropShapeCommand::apply(FileData& data)
+{
+    ObjectData* object = findObject(data, m_id);
+    if (!object || object->type != ObjectType::Prop)
+        return; // 道具以外无形状语义（防御）
+    if (!m_captured) {
+        m_oldShape = object->shape;
+        m_captured = true;
+    }
+    if (m_shape.edgeAngles.size() != m_shape.vertices.size()) {
+        // 防御：长度不变式（正常路径 = 编辑器保证）
+        while (m_shape.edgeAngles.size() < m_shape.vertices.size())
+            m_shape.edgeAngles.append(0.0);
+        while (m_shape.edgeAngles.size() > m_shape.vertices.size())
+            m_shape.edgeAngles.removeLast();
+    }
+    PathGeometry::normalizePropShapeWinding(m_shape); // 写入前统一逆时针
+    object->shape = m_shape;
+}
+
+void SetPropShapeCommand::revert(FileData& data)
+{
+    if (ObjectData* object = findObject(data, m_id))
+        object->shape = m_oldShape;
 }

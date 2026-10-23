@@ -170,3 +170,19 @@ private:
     bool m_oldStandable = true;
     bool m_captured = false;
 };
+
+// 仅道具（阶段13 任务2）：形状编辑器确定时一次性替换形状（快照旧 shape；
+// 写入前顶点绕向归一为逆时针）
+class SetPropShapeCommand : public Command {
+public:
+    SetPropShapeCommand(QString id, PropShape shape);
+
+    void apply(FileData& data) override;
+    void revert(FileData& data) override;
+
+private:
+    QString m_id;
+    PropShape m_shape;
+    std::optional<PropShape> m_oldShape; // 缺省 = 默认矩形
+    bool m_captured = false;
+};

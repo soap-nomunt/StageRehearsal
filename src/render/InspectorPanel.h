@@ -52,6 +52,7 @@ private:
     // ---- 阶段13：道具页 ----
     void commitPropScale();    // scaleX/scaleY 提交（绑定时另一方同步增减同一增量）
     void commitPropStandable(); // 可供站立开关提交
+    void editPropShape();      // 编辑形状：模态编辑器 → 确定一条命令入撤销栈
     double propShapeWidth(const ObjectData& object) const;  // 未缩放形状包围盒宽
     double propShapeDepth(const ObjectData& object) const;  // 未缩放形状包围盒深
 

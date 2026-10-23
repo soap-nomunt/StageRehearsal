@@ -523,6 +523,14 @@ bool EditorCore::setPropStandable(const QString& id, bool standable)
     return executeCommand(std::make_unique<SetPropStandableCommand>(id, standable));
 }
 
+bool EditorCore::setPropShape(const QString& id, const PropShape& shape)
+{
+    const ObjectData* object = findObject(id);
+    if (!object || object->type != ObjectType::Prop)
+        return false;
+    return executeCommand(std::make_unique<SetPropShapeCommand>(id, shape));
+}
+
 bool EditorCore::setStage(const StageData& stage)
 {
     if (stage.width <= 0.0 || stage.depth <= 0.0)

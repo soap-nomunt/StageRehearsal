@@ -148,6 +148,9 @@ public:
     // 范围 0.1~100 仅正值，越界拒绝；standable 切换（false = 阻挡路径编辑）
     bool setPropScale(const QString& id, double scaleX, double scaleY);
     bool setPropStandable(const QString& id, bool standable);
+    // 道具形状（阶段13 任务2）：形状编辑器确定时一次性替换；写入前绕向归一
+    // 逆时针；合围校验在编辑器侧实时做（OK 禁用），此处只校验类型
+    bool setPropShape(const QString& id, const PropShape& shape);
 
     // 舞台设置（阶段7 起直改直提交）：宽/深必须 > 0，非法尺寸拒绝；无变更不提交
     // （返回 false）。不入撤销栈——撤销栈只覆盖主视口/Hierarchy/Inspector/时间轴
