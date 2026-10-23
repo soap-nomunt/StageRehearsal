@@ -27,14 +27,22 @@ public:
     void setGhost(bool ghost) { m_ghost = ghost; }
     bool isGhost() const { return m_ghost; }
 
+    // 阻挡预览标红（阶段13 修复）：拖拽预览穿入禁区时由 StageView 置位，
+    // 红色描边 + 半透明红填充提示；提交/回弹后清除
+    void setBlockedPreview(bool blocked);
+    bool isBlockedPreview() const { return m_blockedPreview; }
+
     // 朝向手柄（演员白三角 / 屏风前端凸点）命中测试，scenePos 为场景坐标
     virtual bool hitRotationHandle(const QPointF& scenePos) const = 0;
 
 protected:
     // 加粗实线高亮描边（深色垫底 + 亮蓝主线，cosmetic 笔不随缩放变粗变细）
     void drawHighlight(QPainter* painter, const QPainterPath& shape) const;
+    // 阻挡预览标红覆盖层（红描边 + 半透明红填充；未置位不画）
+    void drawBlockedOverlay(QPainter* painter, const QPainterPath& shape) const;
 
     QString m_id;
     bool m_highlighted = false;
     bool m_ghost = false;
+    bool m_blockedPreview = false;
 };

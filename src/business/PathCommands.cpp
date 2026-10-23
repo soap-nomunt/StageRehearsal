@@ -29,6 +29,23 @@ QList<QPointF> currentPolyline(const FileData& data, const QString& objectId, do
     return { fromPos, toPos };
 }
 
+// 阶段13 任务3 阻挡校验（提交前调用，true = 拒绝编辑）：编辑后的段路径与障碍物
+// 扫掠相交判定（PathGeometry::pathBlocked 同一采样实现）；newPath = nullptr 表示
+// 编辑后回退为直线（无 PathData）。段帧缺失不在此校验（原有逻辑各自兜底）。
+// 不溯及既往：只约束本次编辑，已有路径不动。
+bool segmentBlockedAfter(const FileData& data, const QString& objectId, double from,
+                         double to, const PathData* newPath)
+{
+    QPointF fromPos;
+    QPointF toPos;
+    if (!resolveSegmentEndpoints(data, objectId, from, to, fromPos, toPos))
+        return false;
+    const QList<QPointF> polyline =
+        newPath ? PathGeometry::samplePath(*newPath, fromPos, toPos)
+                : QList<QPointF> { fromPos, toPos };
+    return PathGeometry::pathBlocked(data, objectId, from, to, polyline);
+}
+
 } // namespace
 
 bool resolveSegmentEndpoints(const FileData& data, const QString& objectId, double from,
@@ -72,36 +89,50 @@ void SetPathTypeCommand::apply(FileData& data)
         m_captured = true;
     }
     const int index = pathIndexAt(data, m_objectId, m_from, m_to);
+
+    // 先在副本上算出编辑后条目（nextEntry）；nullEntry = 编辑后无条目（直线）
+    PathData nextEntry;
+    bool hasEntry = true;
     if (m_type == PathType::Arc) {
         if (index < 0) {
             // 直线且无路径点 → 新建条目（单段弧，默认圆心角立即可见）
-            PathData path;
-            path.objectId = m_objectId;
-            path.from = m_from;
-            path.to = m_to;
-            path.type = PathType::Arc;
-            path.legAngles = { PathGeometry::kDefaultLegAngleDeg };
-            data.paths.append(path);
+            nextEntry.objectId = m_objectId;
+            nextEntry.from = m_from;
+            nextEntry.to = m_to;
+            nextEntry.type = PathType::Arc;
+            nextEntry.legAngles = { PathGeometry::kDefaultLegAngleDeg };
         } else {
-            PathData& path = data.paths[index];
-            path.type = PathType::Arc;
+            nextEntry = data.paths.at(index);
+            nextEntry.type = PathType::Arc;
             // 直线段角度全零（视觉 = 直线）：切弧线时给默认值，立即可见；
             // 曾是弧线的角度保留（切回再切来不丢编辑成果）
             bool allZero = true;
-            for (double angle : path.legAngles)
+            for (double angle : nextEntry.legAngles)
                 allZero = allZero && !PathGeometry::legIsArc(angle);
             if (allZero) {
-                for (double& angle : path.legAngles)
+                for (double& angle : nextEntry.legAngles)
                     angle = PathGeometry::kDefaultLegAngleDeg;
             }
         }
     } else { // Line
         if (index < 0)
             return; // 已是默认直线：无变更
-        PathData& path = data.paths[index];
-        path.type = PathType::Line; // 路径点保留（折线），角度保留（切回弧线恢复）
-        if (path.points.isEmpty())
-            data.paths.removeAt(index); // 零存储默认态：直线且无路径点 → 条目移除
+        nextEntry = data.paths.at(index);
+        nextEntry.type = PathType::Line; // 路径点保留（折线），角度保留（切回弧线恢复）
+        if (nextEntry.points.isEmpty())
+            hasEntry = false; // 零存储默认态：直线且无路径点 → 条目移除
+    }
+    // 阶段13 任务3：提交前阻挡校验（相交 → 拒绝，数据不变不入栈）
+    if (segmentBlockedAfter(data, m_objectId, m_from, m_to,
+                            hasEntry ? &nextEntry : nullptr))
+        return;
+    if (index < 0) {
+        if (hasEntry)
+            data.paths.append(nextEntry);
+    } else if (hasEntry) {
+        data.paths[index] = nextEntry;
+    } else {
+        data.paths.removeAt(index);
     }
 }
 
@@ -128,10 +159,15 @@ void SetPathLegAngleCommand::apply(FileData& data)
         m_oldPaths = data.paths;
         m_captured = true;
     }
-    PathData* path = findPath(data, m_objectId, m_from, m_to);
+    const PathData* path = findPath(data, m_objectId, m_from, m_to);
     if (!path || m_legIndex < 0 || m_legIndex >= path->legAngles.size())
         return; // 段/段下标不存在：无变更
-    path->legAngles[m_legIndex] = m_angleDeg;
+    PathData nextEntry = *path;
+    nextEntry.legAngles[m_legIndex] = m_angleDeg;
+    // 阶段13 任务3：提交前阻挡校验
+    if (segmentBlockedAfter(data, m_objectId, m_from, m_to, &nextEntry))
+        return;
+    data.paths[pathIndexAt(data, m_objectId, m_from, m_to)] = nextEntry;
 }
 
 void SetPathLegAngleCommand::revert(FileData& data)
@@ -220,6 +256,10 @@ void AddPathPointCommand::apply(FileData& data)
     working.legAngles[legIndex] = legRatio * oldAngle;         // θ₁ = f·θ
     working.legAngles.insert(legIndex + 1, (1.0 - legRatio) * oldAngle); // θ₂ = (1−f)·θ
 
+    // 阶段13 任务3：提交前阻挡校验（相交 → 拒绝）
+    if (segmentBlockedAfter(data, m_objectId, m_from, m_to, &working))
+        return;
+
     const int existing = pathIndexAt(data, m_objectId, m_from, m_to);
     if (existing >= 0)
         data.paths[existing] = working;
@@ -250,10 +290,15 @@ void MovePathPointCommand::apply(FileData& data)
         m_oldPaths = data.paths;
         m_captured = true;
     }
-    PathData* path = findPath(data, m_objectId, m_from, m_to);
+    const PathData* path = findPath(data, m_objectId, m_from, m_to);
     if (!path || m_pointIndex < 0 || m_pointIndex >= path->points.size())
         return; // 路径/点不存在：无变更
-    path->points[m_pointIndex] = PathPoint { m_scenePos.x(), m_scenePos.y() };
+    PathData nextEntry = *path;
+    nextEntry.points[m_pointIndex] = PathPoint { m_scenePos.x(), m_scenePos.y() };
+    // 阶段13 任务3：提交前阻挡校验（拖点落入禁区 → 拒绝，StageView 回弹）
+    if (segmentBlockedAfter(data, m_objectId, m_from, m_to, &nextEntry))
+        return;
+    data.paths[pathIndexAt(data, m_objectId, m_from, m_to)] = nextEntry;
 }
 
 void MovePathPointCommand::revert(FileData& data)
@@ -341,7 +386,12 @@ void SetPathPointTCommand::apply(FileData& data)
     const double clamped = qBound(lo + kMargin, m_t, qMax(lo + kMargin, hi - kMargin));
     const QPointF pos = PathGeometry::pointAtRatio(
         polyline, PathGeometry::cumulativeLengths(polyline), clamped);
-    path->points[m_pointIndex] = PathPoint { pos.x(), pos.y() };
+    PathData nextEntry = *path;
+    nextEntry.points[m_pointIndex] = PathPoint { pos.x(), pos.y() };
+    // 阶段13 任务3：提交前阻挡校验
+    if (segmentBlockedAfter(data, m_objectId, m_from, m_to, &nextEntry))
+        return;
+    data.paths[pathIndexAt(data, m_objectId, m_from, m_to)] = nextEntry;
 }
 
 void SetPathPointTCommand::revert(FileData& data)

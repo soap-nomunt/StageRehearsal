@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "stage": { "width": 1500, "depth": 900, "centerOffset": 100 },
   "objects": [
     {
@@ -29,6 +29,22 @@
     {
       "id": "screen-002", "type": "screen", "name": "屏风2", "color": "#9b59b6",
       "transform": { "x": 400, "y": 500, "rotation": 0 },
+      "keyframes": []
+    },
+    {
+      "id": "prop-001", "type": "prop", "name": "道具1", "color": "#b0814e",
+      "transform": { "x": -500, "y": 700, "rotation": 0 },
+      "scaleX": 1.5, "scaleY": 1.0, "standable": true,
+      "keyframes": []
+    },
+    {
+      "id": "prop-002", "type": "prop", "name": "道具2", "color": "#7f6a52",
+      "transform": { "x": 200, "y": 800, "rotation": 0 },
+      "scaleX": 1.0, "scaleY": 1.0, "standable": false,
+      "shape": {
+        "vertices": [ { "x": -60, "y": -40 }, { "x": -60, "y": 50 }, { "x": 70, "y": 0 } ],
+        "edgeAngles": [ 0, 0, 0 ]
+      },
       "keyframes": []
     }
   ],

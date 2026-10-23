@@ -1,5 +1,9 @@
 #include "KeyframeCommands.h"
 
+#include "PathGeometry.h"
+
+#include <QPointF>
+
 #include <algorithm>
 
 namespace {
@@ -87,7 +91,117 @@ void rebindPaths(FileData& data, const QString& objectId, double oldT, double ne
     }
 }
 
+// ---- 阶段13 修复：对象位置变更（拖拽/微调/Inspector/打帧/粘贴关键帧）的阻挡校验 ----
+// 统一收口在 UpsertKeyframesCommand：所有位置类关键帧写入都经过它。
+// 对位置实际变化（与既有帧值/插入点插值基准不同；纯旋转或值未变跳过）的条目，
+// 在新状态上计算受影响相邻段（更新帧：前一帧→该帧、该帧→后一帧；插入劈段：
+// 劈出的两条新段；首前/末后插入：仅一侧段），逐段按实际路径（有 PathData 用复合
+// 曲线，无则直线）扫掠判定（PathGeometry::pathBlocked 同一采样实现）。
+
+// 把 upsert 条目应用到 data（含段内劈开丢弃路径级联与时长延长；不含阻挡校验）
+void applyUpsertItems(FileData& data, const QList<ObjectKeyframe>& items)
+{
+    for (const ObjectKeyframe& item : items) {
+        if (ObjectData* object = findObject(data, item.id)) {
+            const bool isInsert =
+                keyframeIndexAt(object->keyframes, item.keyframe.t) < 0;
+            if (isInsert)
+                dropPathsContaining(data, item.id, item.keyframe.t);
+            upsertKeyframe(object->keyframes, item.keyframe);
+        }
+        ensureDuration(data, item.keyframe.t);
+    }
+}
+
+// 应用后校验：data = 已应用条目后的状态；oldKeyframes/oldPaths = 应用前快照
+bool editsBlockedPostApply(const FileData& data,
+                           const QList<QPair<QString, QList<Keyframe>>>& oldKeyframes,
+                           const QList<PathData>& oldPaths,
+                           const QList<ObjectKeyframe>& items)
+{
+    for (const ObjectKeyframe& item : items) {
+        const ObjectData* object = findObject(const_cast<FileData&>(data), item.id);
+        if (!object)
+            continue;
+        // 位置是否实际变化：与既有帧值或插入点插值基准比较（纯旋转/值未变跳过）
+        bool moved = false;
+        QList<Keyframe> oldList;
+        for (const auto& entry : oldKeyframes) {
+            if (entry.first == item.id)
+                oldList = entry.second;
+        }
+        const int oldIndex = keyframeIndexAt(oldList, item.keyframe.t);
+        if (oldIndex >= 0) {
+            const Keyframe& oldKey = oldList.at(oldIndex);
+            moved = qAbs(oldKey.x - item.keyframe.x) > 1e-9
+                || qAbs(oldKey.y - item.keyframe.y) > 1e-9;
+        } else {
+            // 插入新帧：基准 = 旧状态该时刻插值位置（轨迹不变则不算移动）
+            ObjectData baseline = *object;
+            baseline.keyframes = oldList;
+            const Transform base =
+                TimelinePlayer::interpolate(baseline, oldPaths, item.keyframe.t);
+            moved = qAbs(base.x - item.keyframe.x) > 1e-9
+                || qAbs(base.y - item.keyframe.y) > 1e-9;
+        }
+        if (!moved)
+            continue;
+        // 受影响相邻段（新状态的关键帧列表按 t 有序）
+        const QList<Keyframe>& keys = object->keyframes;
+        int index = keyframeIndexAt(keys, item.keyframe.t);
+        if (index < 0)
+            continue;
+        for (int side = 0; side < 2; ++side) {
+            const bool prevSide = side == 0;
+            const int neighbor = prevSide ? index - 1 : index + 1;
+            if (neighbor < 0 || neighbor >= keys.size())
+                continue; // 首帧前/末帧后插入：只有一侧段
+            const double segFrom =
+                prevSide ? keys.at(neighbor).t : item.keyframe.t;
+            const double segTo = prevSide ? item.keyframe.t : keys.at(neighbor).t;
+            if (segTo - segFrom <= TimelinePlayer::kTimeEpsilon)
+                continue;
+            const Keyframe& a = prevSide ? keys.at(neighbor) : keys.at(index);
+            const Keyframe& b = prevSide ? keys.at(index) : keys.at(neighbor);
+            const QPointF fromPos(a.x, a.y);
+            const QPointF toPos(b.x, b.y);
+            QList<QPointF> polyline;
+            if (const PathData* path = PathGeometry::findPathData(data.paths, item.id,
+                                                                  segFrom, segTo)) {
+                polyline = PathGeometry::samplePath(*path, fromPos, toPos);
+            } else {
+                polyline = { fromPos, toPos };
+            }
+            if (PathGeometry::pathBlocked(data, item.id, segFrom, segTo, polyline))
+                return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
+
+// 阶段13 修复：预览/入口共用的位置变更阻挡查询——把条目模拟应用到 data 副本后
+// 按受影响段扫掠判定（与 UpsertKeyframesCommand::apply 同路径，不改真实数据）
+bool keyframeEditsBlocked(const FileData& data, const QList<ObjectKeyframe>& items)
+{
+    FileData working = data;
+    // 旧快照（用于位置变化检测）
+    QList<QPair<QString, QList<Keyframe>>> oldKeyframes;
+    for (const ObjectKeyframe& item : items) {
+        bool already = false;
+        for (const auto& entry : oldKeyframes)
+            already = already || entry.first == item.id;
+        if (!already) {
+            const ObjectData* object = findObject(working, item.id);
+            if (object)
+                oldKeyframes.append(qMakePair(item.id, object->keyframes));
+        }
+    }
+    const QList<PathData> oldPaths = working.paths;
+    applyUpsertItems(working, items);
+    return editsBlockedPostApply(working, oldKeyframes, oldPaths, items);
+}
 
 // ---- UpsertKeyframesCommand ----
 
@@ -114,17 +228,11 @@ void UpsertKeyframesCommand::apply(FileData& data)
         m_oldPaths = data.paths;
         m_captured = true;
     }
-    for (const ObjectKeyframe& item : m_items) {
-        if (ObjectData* object = findObject(data, item.id)) {
-            // 阶段12 级联：插入新帧（非更新端点帧）落进某段内部 → 该段路径丢弃
-            const bool isInsert =
-                keyframeIndexAt(object->keyframes, item.keyframe.t) < 0;
-            if (isInsert)
-                dropPathsContaining(data, item.id, item.keyframe.t);
-            upsertKeyframe(object->keyframes, item.keyframe);
-        }
-        ensureDuration(data, item.keyframe.t);
-    }
+    applyUpsertItems(data, m_items); // 含段内劈开丢弃路径级联与时长延长
+    // 阶段13 修复：位置变更的阻挡校验——穿阻挡则整条命令回滚（数据不变 →
+    // executeCommand 无变更丢弃，调用方得 false、零撤销条目）
+    if (editsBlockedPostApply(data, m_oldKeyframes, m_oldPaths, m_items))
+        revert(data);
 }
 
 void UpsertKeyframesCommand::revert(FileData& data)

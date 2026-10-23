@@ -109,8 +109,12 @@ public:
     // 无关键帧 → 已抑制则直接打帧，否则经 confirm 询问，选"否"则整个批次
     // 不产生任何数据变更（返回 false，渲染层负责把图元回弹到插值显示位置）。
     // 传入的是"显示基准上的新绝对值"；一批对象合并为一条命令（一步撤销）。
+    // 阶段13 修复：位置实际变化且受影响段穿阻挡 → 整条命令拒绝（返回 false）。
     bool setTransformsAtCursor(const QList<ObjectTransform>& updates,
                                const KeyframeConfirmCallback& confirm);
+    // 阶段13 修复：视口拖拽预览查询——按 setTransformsAtCursor 同一过滤与命令
+    // 路径模拟应用，返回"若提交是否穿阻挡被拒"（不改真实数据）
+    bool wouldTransformBlocked(const QList<ObjectTransform>& updates) const;
     bool moveSelectionBy(const QPointF& deltaCm,
                          const KeyframeConfirmCallback& confirm); // 方向键微调，不吸附
 

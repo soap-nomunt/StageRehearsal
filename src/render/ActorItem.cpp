@@ -66,4 +66,5 @@ void ActorItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* /*optio
     QPainterPath circle;
     circle.addEllipse(QPointF(0.0, 0.0), m_radius, m_radius);
     drawHighlight(painter, circle);
+    drawBlockedOverlay(painter, circle); // 阶段13：阻挡预览标红
 }

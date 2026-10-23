@@ -31,6 +31,17 @@
 // 圆心角钳制/加点保形/拖点/删点合并/t 滑动保序/恢复直线）与关键帧级联（改时刻
 // 重绑定、段内打帧丢弃、删帧相邻两段丢弃、删对象级联）及撤销恢复；插值弧长匀速
 // 数值断言（等 t 步进 = 等弧长步进，无路径段与旧行为逐位一致）。
+// 阶段13：存档 v5——ObjectData 道具字段（shape/scaleX/scaleY/standable）往返逐字段 /
+// v4 迁移宽容缺省 / 非法形状回退默认矩形；EditorCore 解禁 createObject(Prop) /
+// reparent 可作子不可作父 / setPropScale/setPropStandable/setPropShape 命令；
+// 合围校验纯函数全分支（validatePropShape：顶点数/零长边/直线与弧边自交/退化）；
+// 阻挡判定（pathBlocked：屏风/不可站立道具扫掠相交，演员不挡，自身排除，不溯及
+// 既往）+ PathCommands 五类操作提交前拒绝。
+// 阶段13 修复（开发者实测漏洞）：位置变更类关键帧写入统一收口
+// UpsertKeyframesCommand 扫掠判定——受影响相邻段逐段判定（更新帧前后两段/插入
+// 劈段劈出两段/首前末后单侧），纯旋转/零位移跳过，穿阻挡整条回滚零撤销条目；
+// 拖拽/方向键/Inspector/打帧/粘贴关键帧全覆盖；已有 PathData 段按弧线路径判定；
+// 多对象批量任一受阻整批拒绝。
 #include "business/Commands.h"
 #include "business/EditorCore.h"
 #include "business/KeyframeCommands.h"
@@ -2621,6 +2632,355 @@ void testShapeEditing()
     }
 }
 
+// 阶段13 任务3：站立阻挡——PathGeometry::pathBlocked 纯函数全分支（屏风静态阻挡/
+// 道具阻挡/standable=true 不挡/演员不挡/移动道具扫掠命中/端点落入判定/弧线与矩形
+// 边相交而直线相离/相离不挡/自身排除）+ PathCommands 五类操作提交前拒绝（数据
+// 不变、不入撤销栈）+ 不溯及既往（障碍物后移入已有路径不改动已有路径）
+void testBlocking()
+{
+    // 场景：wallA 竖墙（屏风，(100,100) 旋转 90°，200×10 → x∈[95,105], y∈[0,200]）；
+    // wallB 横墙（屏风，(100,470)，300×10 → x∈[-50,250], y∈[465,475]）
+    // 演员甲段 S1：(0,100)→(200,100) 跨 wallA；段 S2：(0,500)→(200,500) 直线下不穿 wallB
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+    FileData setup = FileData::createDefault();
+
+    ObjectData mover;
+    mover.id = QStringLiteral("actor-001");
+    mover.type = ObjectType::Actor;
+    mover.name = QStringLiteral("演员甲");
+    mover.keyframes = { Keyframe { 1.0, 0.0, 100.0, 0.0 }, Keyframe { 3.0, 200.0, 100.0, 0.0 },
+                        Keyframe { 5.0, 0.0, 500.0, 0.0 }, Keyframe { 7.0, 200.0, 500.0, 0.0 } };
+
+    ObjectData wallA;
+    wallA.id = QStringLiteral("screen-001");
+    wallA.type = ObjectType::Screen;
+    wallA.name = QStringLiteral("竖墙");
+    wallA.size = QSizeF(200.0, 10.0);
+    wallA.transform = { 100.0, 100.0, 90.0 };
+
+    ObjectData wallB;
+    wallB.id = QStringLiteral("screen-002");
+    wallB.type = ObjectType::Screen;
+    wallB.name = QStringLiteral("横墙");
+    wallB.size = QSizeF(300.0, 10.0);
+    wallB.transform = { 100.0, 470.0, 0.0 };
+
+    setup.objects = { mover, wallA, wallB };
+    runtime.commitFileData(setup);
+    const FileData& file = runtime.fileData();
+
+    // ---- 纯函数分支 ----
+    const QList<QPointF> s1Straight { QPointF(0.0, 100.0), QPointF(200.0, 100.0) };
+    CHECK(PathGeometry::pathBlocked(file, QStringLiteral("actor-001"), 1.0, 3.0, s1Straight),
+          "阻挡：屏风竖墙挡住直线路径（折线与旋转矩形边相交）");
+    const QList<QPointF> away { QPointF(0.0, 300.0), QPointF(200.0, 300.0) };
+    CHECK(!PathGeometry::pathBlocked(file, QStringLiteral("actor-001"), 1.0, 3.0, away),
+          "阻挡：相离路径不挡");
+
+    // 弧线绕开 vs 直线被挡（差异判定）：S2 直线不穿 wallB；向上大弧（θ=170°）顶点
+    // 越过 wallB → 挡
+    const QList<QPointF> s2Straight { QPointF(0.0, 500.0), QPointF(200.0, 500.0) };
+    CHECK(!PathGeometry::pathBlocked(file, QStringLiteral("actor-001"), 5.0, 7.0, s2Straight),
+          "阻挡：直线从横墙下方穿过（不穿）不挡");
+    PathData arcPath;
+    arcPath.objectId = QStringLiteral("actor-001");
+    arcPath.from = 5.0;
+    arcPath.to = 7.0;
+    arcPath.type = PathType::Arc;
+    arcPath.legAngles = { 170.0 };
+    const QList<QPointF> s2Arc = PathGeometry::samplePath(arcPath, QPointF(0.0, 500.0),
+                                                          QPointF(200.0, 500.0));
+    CHECK(PathGeometry::pathBlocked(file, QStringLiteral("actor-001"), 5.0, 7.0, s2Arc),
+          "阻挡：弧线鼓入横墙（直线相离弧线相交的差异判定）");
+
+    // 道具阻挡 vs standable=true 不挡 vs 演员不挡
+    {
+        FileData withProp = file;
+        ObjectData blocker;
+        blocker.id = QStringLiteral("prop-001");
+        blocker.type = ObjectType::Prop;
+        blocker.name = QStringLiteral("路障");
+        blocker.standable = false; // 不可站立 → 阻挡
+        blocker.transform = { 100.0, 300.0, 0.0 }; // 默认矩形 100×100 → x∈[50,150], y∈[250,350]
+        withProp.objects.append(blocker);
+        ObjectData actorBlocker;
+        actorBlocker.id = QStringLiteral("actor-002");
+        actorBlocker.type = ObjectType::Actor;
+        actorBlocker.name = QStringLiteral("演员乙");
+        actorBlocker.transform = { 100.0, 600.0, 0.0 };
+        withProp.objects.append(actorBlocker);
+
+        CHECK(PathGeometry::pathBlocked(withProp, QStringLiteral("actor-001"), 1.0, 3.0,
+                                        away), // away = (0,300)→(200,300) 横穿该道具
+              "阻挡：standable=false 道具挡住路径（端点落入/边相交）");
+        // standable=true → 不挡（blocker 是倒数第二个对象）
+        withProp.objects[withProp.objects.size() - 2].standable = true;
+        CHECK(!PathGeometry::pathBlocked(withProp, QStringLiteral("actor-001"), 1.0, 3.0,
+                                         away),
+              "阻挡：standable=true 道具不挡");
+        // 演员不挡：路径横穿演员乙（(100,600)）
+        const QList<QPointF> throughActor { QPointF(0.0, 600.0), QPointF(200.0, 600.0) };
+        CHECK(!PathGeometry::pathBlocked(withProp, QStringLiteral("actor-001"), 1.0, 3.0,
+                                         throughActor),
+              "阻挡：演员不是障碍物（横穿不挡）");
+
+        // 端点落入判定：路径终点在道具内
+        withProp.objects[3].standable = false; // prop-001 恢复不可站立
+        const QList<QPointF> endInside { QPointF(0.0, 700.0), QPointF(100.0, 300.0) };
+        CHECK(PathGeometry::pathBlocked(withProp, QStringLiteral("actor-001"), 1.0, 3.0,
+                                        endInside),
+              "阻挡：路径终点落入障碍物多边形");
+
+        // 移动道具扫掠命中：道具段 0→4s 从远处移到路径上，段扫掠中时刻命中
+        withProp.objects[3].keyframes = { Keyframe { 0.0, 1000.0, 300.0, 0.0 },
+                                          Keyframe { 2.0, 100.0, 300.0, 0.0 },
+                                          Keyframe { 4.0, 1000.0, 300.0, 0.0 } };
+        CHECK(PathGeometry::pathBlocked(withProp, QStringLiteral("actor-001"), 1.0, 3.0,
+                                        away),
+              "阻挡：移动道具扫掠命中（段中时刻障碍位移至路径上）");
+        // 对照：道具始终在远处 → 不挡
+        withProp.objects[3].keyframes = { Keyframe { 0.0, 1000.0, 300.0, 0.0 },
+                                          Keyframe { 4.0, 1000.0, 300.0, 0.0 } };
+        CHECK(!PathGeometry::pathBlocked(withProp, QStringLiteral("actor-001"), 1.0, 3.0,
+                                         away),
+              "阻挡：移动道具始终在远处不挡");
+    }
+
+    // 自身排除：standable=false 道具编辑自己的路径不被自己挡
+    {
+        FileData selfFile = file;
+        ObjectData selfProp;
+        selfProp.id = QStringLiteral("prop-001");
+        selfProp.type = ObjectType::Prop;
+        selfProp.name = QStringLiteral("路障");
+        selfProp.standable = false;
+        selfProp.transform = { 100.0, 300.0, 0.0 };
+        selfProp.keyframes = { Keyframe { 0.0, 100.0, 300.0, 0.0 },
+                               Keyframe { 4.0, 100.0, 300.0, 0.0 } };
+        selfFile.objects.append(selfProp);
+        const QList<QPointF> selfPath { QPointF(100.0, 300.0), QPointF(100.0, 300.0) };
+        CHECK(!PathGeometry::pathBlocked(selfFile, QStringLiteral("prop-001"), 0.0, 4.0,
+                                         selfPath),
+              "阻挡：障碍物自身被排除（自己的路径不被自己挡）");
+    }
+
+    // ---- PathCommands 提交前拒绝（数据不变、不入撤销栈） ----
+    // S2 段（5s→7s）：横墙 wallB 上方不穿直线；先切弧线（默认 30° 弧顶点 y≈486.6
+    // 不穿横墙）允许，再把角度改大到 170°（顶点 y≈408 穿墙）→ 拒绝
+    CHECK(core.setPathType(QStringLiteral("actor-001"), 5.0, 7.0, PathType::Arc),
+          "切弧线（默认 30° 不穿横墙）：允许");
+    CHECK(runtime.fileData().paths.size() == 1 && core.canUndo(),
+          "切弧线未穿墙：允许并入撤销栈");
+    CHECK(!core.setPathLegAngle(QStringLiteral("actor-001"), 5.0, 7.0, 0, 170.0),
+          "拒绝：改圆心角 170° 穿横墙");
+    CHECK(runtime.fileData().paths.first().legAngles.first() == 30.0
+              && runtime.fileData().paths.size() == 1,
+          "拒绝后数据不变");
+    CHECK(core.undo() && runtime.fileData().paths.isEmpty() && !core.canUndo(),
+          "undo 恢复直线（拒绝未入栈，栈中只有切弧线一条）");
+
+    // S1 段（1s→3s）：直线即穿竖墙 wallA → 一切编辑都拒绝
+    CHECK(!core.addPathPoint(QStringLiteral("actor-001"), 1.0, 3.0, QPointF(100.0, 100.0)),
+          "拒绝：穿墙直线上加点");
+    CHECK(runtime.fileData().paths.isEmpty() && !core.canUndo(),
+          "拒绝后零变更零撤销条目");
+
+    // 拖点/改 t 拒绝：先在 S2 直线上加点（允许），再拖点入 wallA → 拒绝
+    CHECK(core.addPathPoint(QStringLiteral("actor-001"), 5.0, 7.0, QPointF(100.0, 500.0)),
+          "S2 直线加点（不穿任何墙）允许");
+    CHECK(!core.movePathPoint(QStringLiteral("actor-001"), 5.0, 7.0, 0,
+                              QPointF(100.0, 100.0)),
+          "拒绝：拖路径点入竖墙");
+    CHECK(runtime.fileData().paths.first().points.first().x == 100.0
+              && runtime.fileData().paths.first().points.first().y == 500.0,
+          "拒绝后路径点不动");
+    // 改 t：沿曲线滑动不离开曲线，曲线不穿墙 → 允许
+    CHECK(core.setPathPointT(QStringLiteral("actor-001"), 5.0, 7.0, 0, 0.25),
+          "改 t（曲线不穿墙）允许");
+    CHECK(core.undo() && core.undo() && runtime.fileData().paths.isEmpty(),
+          "清理：撤销加点与改 t");
+
+    // 不溯及既往：路径已存在后障碍物移入，已有路径不动；再编辑才被拒
+    CHECK(core.addPathPoint(QStringLiteral("actor-001"), 5.0, 7.0, QPointF(100.0, 500.0)),
+          "不溯及：先有路径点");
+    {
+        FileData moved = runtime.fileData();
+        moved.objects[2].transform = { 100.0, 500.0, 0.0 }; // wallB 移到路径上（直改演示）
+        runtime.commitFileData(moved);
+    }
+    CHECK(runtime.fileData().paths.size() == 1
+              && runtime.fileData().paths.first().points.size() == 1,
+          "不溯及既往：障碍物移入后已有路径不动");
+    CHECK(!core.setPathPointT(QStringLiteral("actor-001"), 5.0, 7.0, 0, 0.8),
+          "障碍物移入后再编辑（改 t）被拒绝");
+    CHECK(!core.addPathPoint(QStringLiteral("actor-001"), 5.0, 7.0, QPointF(150.0, 500.0)),
+          "障碍物移入后再加点被拒绝");
+    while (core.canUndo())
+        core.undo(); // 清理哨兵
+}
+
+// 阶段13 修复（开发者实测漏洞）：位置变更类关键帧写入的阻挡校验——统一收口在
+// UpsertKeyframesCommand（拖拽/方向键/Inspector/打帧/粘贴关键帧全覆盖）：
+// 位置实际变化的条目计算受影响相邻段（更新帧取前后两段、插入劈段取劈出两段、
+// 首前末后仅一侧），逐段按实际路径扫掠判定；相交则整条命令回滚（数据不变、
+// 零撤销条目）；纯旋转/零位移跳过；已有 PathData 的段按弧线路径判定；
+// 多对象批量任一受阻整批拒绝
+void testTransformBlocking()
+{
+    // 场景：竖墙屏风（200,100）旋转 90°，100×10 → x∈[195,205], y∈[50,150]；
+    // 演员甲帧 t=1 (100,300)、t=3 (300,300)（弦 y=300 不穿墙）
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+    FileData setup = FileData::createDefault();
+    ObjectData actorA;
+    actorA.id = QStringLiteral("actor-001");
+    actorA.type = ObjectType::Actor;
+    actorA.name = QStringLiteral("演员甲");
+    actorA.keyframes = { Keyframe { 1.0, 100.0, 300.0, 0.0 },
+                         Keyframe { 3.0, 300.0, 300.0, 0.0 } };
+    ObjectData wall;
+    wall.id = QStringLiteral("screen-001");
+    wall.type = ObjectType::Screen;
+    wall.name = QStringLiteral("竖墙");
+    wall.size = QSizeF(100.0, 10.0);
+    wall.transform = { 200.0, 100.0, 90.0 };
+    setup.objects = { actorA, wall };
+    runtime.commitFileData(setup);
+
+    core.timelinePlayer()->seekTo(1.0); // 游标在帧 t=1 上（更新既有帧路径）
+    // ---- 拖拽打帧穿屏风被拒（更新 t=1 帧到墙内：段 (1→3) 端点落入） ----
+    CHECK(!core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 200.0, 100.0, 0.0 } } },
+              [] { return true; }),
+          "修复：更新帧到墙内被拒（端点落入屏风）");
+    CHECK(runtime.fileData().objects.first().keyframes.size() == 2
+              && runtime.fileData().objects.first().keyframes.first().x == 100.0,
+          "修复：被拒后数据不变");
+    CHECK(!core.canUndo(), "修复：被拒零撤销条目");
+
+    // ---- 合法移动不受影响 ----
+    CHECK(core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 150.0, 300.0, 0.0 } } },
+              [] { return true; }),
+          "修复：合法移动允许（不穿墙）");
+    CHECK(runtime.fileData().objects.first().keyframes.first().x == 150.0,
+          "修复：合法移动提交生效");
+    CHECK(core.undo(), "修复：撤销合法移动回 100");
+
+    // ---- 纯旋转跳过校验（位置不变，即使目标朝向"对着墙"） ----
+    CHECK(core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 100.0, 300.0, 45.0 } } },
+              [] { return true; }),
+          "修复：纯旋转跳过阻挡校验");
+    CHECK(qAbs(runtime.fileData().objects.first().keyframes.first().rotation - 45.0) < 0.01,
+          "修复：纯旋转提交生效");
+    core.undo();
+
+    // ---- 插入劈段校验：段中插入新帧，劈出的新段端点入墙 → 拒；空区 → 允许 ----
+    core.timelinePlayer()->seekTo(2.0); // 段中点（无帧 → 插入路径）
+    CHECK(!core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 200.0, 100.0, 0.0 } } },
+              [] { return true; }),
+          "修复：插入劈段新段端点入墙被拒");
+    CHECK(runtime.fileData().objects.first().keyframes.size() == 2,
+          "修复：劈段被拒后帧数不变");
+    CHECK(core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 150.0, 350.0, 0.0 } } },
+              [] { return true; }),
+          "修复：插入劈段到空区允许");
+    CHECK(runtime.fileData().objects.first().keyframes.size() == 3,
+          "修复：劈段允许后新帧落数据");
+    core.undo();
+
+    // ---- 首帧前/末帧后插入单侧段 ----
+    core.timelinePlayer()->seekTo(0.5); // 首帧前
+    CHECK(!core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 200.0, 100.0, 0.0 } } },
+              [] { return true; }),
+          "修复：首帧前插入单侧段入墙被拒");
+    core.timelinePlayer()->seekTo(4.0); // 末帧后
+    CHECK(core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 350.0, 300.0, 0.0 } } },
+              [] { return true; }),
+          "修复：末帧后插入到空区允许");
+    core.undo();
+
+    // ---- 穿不可站立道具被拒 / standable=true 不挡 ----
+    core.createObject(ObjectType::Prop, QPointF(150.0, 320.0)); // 默认矩形 x∈[100,200], y∈[270,370]
+    const QString propBlocker = runtime.fileData().objects.last().id;
+    core.setPropStandable(propBlocker, false);
+    core.timelinePlayer()->seekTo(1.0);
+    CHECK(!core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 150.0, 320.0, 0.0 } } },
+              [] { return true; }),
+              // 注：该点也在墙外（x=150 < 195）——被道具挡
+          "修复：更新帧入不可站立道具被拒");
+    core.setPropStandable(propBlocker, true);
+    CHECK(core.setTransformsAtCursor(
+              { { QStringLiteral("actor-001"), { 150.0, 320.0, 0.0 } } },
+              [] { return true; }),
+          "修复：standable=true 道具不挡（允许穿入）");
+    core.undo();
+
+    // ---- 已有 PathData 的弧线段：端点改动按弧线路径判定（直线不穿弧线穿） ----
+    {
+        // 手搭弧线路径（grandfather 直改数据）：段 1→3，θ=-170°（下鼓大弧）；
+        // 道具在 (200, 380)（不可站立，x∈[150,250], y∈[330,430]）；弦 y=300 不穿、
+        // 弧顶点 y≈391 穿
+        core.createObject(ObjectType::Prop, QPointF(200.0, 380.0));
+        const QString arcBlocker = runtime.fileData().objects.last().id;
+        core.setPropStandable(arcBlocker, false);
+        FileData withArc = runtime.fileData();
+        PathData arc;
+        arc.objectId = QStringLiteral("actor-001");
+        arc.from = 1.0;
+        arc.to = 3.0;
+        arc.type = PathType::Arc;
+        arc.legAngles = { -170.0 }; // 下鼓：顶点 y≈300+91=391 穿道具区 [330,430]
+        withArc.paths.append(arc);
+        runtime.commitFileData(withArc); // 不溯及既往：直改搭场景
+        // 端点小改（弦不穿道具）：弧线仍穿 → 拒
+        CHECK(!core.setTransformsAtCursor(
+                  { { QStringLiteral("actor-001"), { 100.0, 310.0, 0.0 } } },
+                  [] { return true; }),
+              "修复：弧线段端点小改按弧线判定（弧穿道具被拒）");
+        // 对照：恢复直线后同一改动允许（证明拒因是弧线路径而非弦）
+        CHECK(core.resetPath(QStringLiteral("actor-001"), 1.0, 3.0),
+              "修复：恢复直线（不受阻挡校验）");
+        CHECK(core.setTransformsAtCursor(
+                  { { QStringLiteral("actor-001"), { 100.0, 310.0, 0.0 } } },
+                  [] { return true; }),
+              "修复：恢复直线后同一端点改动允许（直线不穿）");
+        core.undo(); // 撤销端点改动
+        core.undo(); // 撤销恢复直线
+        CHECK(runtime.fileData().paths.size() == 1, "修复：undo 回弧线状态");
+    }
+
+    // ---- 多对象批量：任一受阻整批拒绝 ----
+    {
+        // 演员乙帧 t=1 (100,500)；与甲一起批量移动：甲入墙、乙入空区 → 整批拒绝
+        core.createObject(ObjectType::Actor, QPointF(0.0, 0.0));
+        const QString actorB = runtime.fileData().objects.last().id;
+        core.upsertKeyframe(actorB, Keyframe { 1.0, 100.0, 500.0, 0.0 });
+        core.timelinePlayer()->seekTo(1.0);
+        CHECK(!core.setTransformsAtCursor(
+                  { { QStringLiteral("actor-001"), { 200.0, 100.0, 0.0 } },
+                    { actorB, { 150.0, 500.0, 0.0 } } },
+                  [] { return true; }),
+              "修复：多对象批量任一受阻整批拒绝");
+        const ObjectData* a = core.findObject(QStringLiteral("actor-001"));
+        const ObjectData* b = core.findObject(actorB);
+        CHECK(a->keyframes.first().x == 100.0 && b->keyframes.first().x == 100.0,
+              "修复：整批拒绝后双方数据都不变");
+        // 拒绝未入栈：undo 弹的是上一条合法命令（乙的打帧），不是批量幻影
+        CHECK(core.undo() && core.findObject(actorB)->keyframes.isEmpty(),
+              "修复：整批拒绝零撤销条目（undo 弹上一条合法命令）");
+    }
+    while (core.canUndo())
+        core.undo(); // 清理哨兵
+}
+
 // 阶段8：AppSettings 最近使用列表（MRU）语义 + RuntimeData 记录时机。
 // MRU 哨兵在用例开头/结尾清理，避免残留影响下次运行
 void testRecentFiles(QTemporaryDir& dir)
@@ -2770,6 +3130,8 @@ int main(int argc, char* argv[])
     testPaths();
     testPropFields(dir);
     testShapeEditing();
+    testBlocking();
+    testTransformBlocking();
     testUndoStack(dir);
     testUndoRedoSequence();
     testRecentFiles(dir);

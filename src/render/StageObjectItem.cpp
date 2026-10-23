@@ -20,6 +20,30 @@ void StageObjectItem::setHighlighted(bool highlighted)
     update();
 }
 
+void StageObjectItem::setBlockedPreview(bool blocked)
+{
+    if (m_blockedPreview == blocked)
+        return;
+    m_blockedPreview = blocked;
+    update();
+}
+
+void StageObjectItem::drawBlockedOverlay(QPainter* painter, const QPainterPath& shape) const
+{
+    if (!m_blockedPreview)
+        return;
+    // 阻挡预览标红：半透明红填充 + 红描边（cosmetic 恒宽）
+    painter->setPen(Qt::NoPen);
+    painter->setBrush(QColor(231, 76, 60, 90));
+    painter->drawPath(shape);
+    QPen pen(QColor(QStringLiteral("#e74c3c")));
+    pen.setWidth(3);
+    pen.setCosmetic(true);
+    painter->setPen(pen);
+    painter->setBrush(Qt::NoBrush);
+    painter->drawPath(shape);
+}
+
 void StageObjectItem::drawHighlight(QPainter* painter, const QPainterPath& shape) const
 {
     if (!m_highlighted)

@@ -70,6 +70,15 @@
 // 阶段13 追加：舞台道具基础对象 + 存档 v5——Create 对话框道具可选、创建
 // 默认矩形道具、Inspector 道具页（scale 绑定 delta 同步/standable/实际尺寸/
 // 编辑形状占位禁用）、拖拽/框选/复制粘贴/打帧/双帧幽灵/删除/撤销重做全链路。
+// 阶段13 任务2 追加：形状编辑器（ShapeEditDialog 模态 QTimer 驱动）——四种
+// 基础形状生成/顶点拖拽吸附/右键边上加点保形/删点下限/边弧编辑/自交非法禁
+// 确定/取消零变更/确定提交一条命令入撤销栈。
+// 阶段13 任务3 追加：站立阻挡——拖路径点入屏风预览标红+松开拒绝回弹（数据
+// 不变零撤销条目）、改圆心角穿道具拒绝+Inspector 回弹、standable 切换不溯及、
+// 合法编辑不受阻；示例存档升 v5（2 个演示道具，其一 standable=false 三角形）。
+// 阶段13 修复追加（开发者实测漏洞）：位置变更类提交同样扫掠判定——统一收口
+// UpsertKeyframesCommand；视口拖拽入墙标红+回弹+零撤销条目、Inspector 数值
+// 提交被拒回弹、多选拖拽任一受阻整批拒绝、合法拖拽照常。
 //
 // 运行（Git Bash，项目根目录）：
 //   QT_QPA_PLATFORM=offscreen ./build/Debug/InteractionSelfTest.exe
@@ -218,9 +227,9 @@ int main(int argc, char* argv[])
     runtime->settings().setGridSizeCm(AppSettings::defaultGridSizeCm);
     runtime->settings().setSnapRangeCm(AppSettings::defaultSnapRangeCm);
 
-    // ---- 初始状态：示例存档 5 对象、舞台不进 Hierarchy、无选中 ----
-    CHECK(runtime->fileData().objects.size() == 5, "启动加载示例存档（5 个对象）");
-    CHECK(tree->topLevelItemCount() == 5, "Hierarchy 平铺 5 个对象（舞台不列出）");
+    // ---- 初始状态：示例存档 7 对象（阶段13 起含 2 个演示道具）、舞台不进 Hierarchy、无选中 ----
+    CHECK(runtime->fileData().objects.size() == 7, "启动加载示例存档（7 个对象，含 2 道具）");
+    CHECK(tree->topLevelItemCount() == 7, "Hierarchy 平铺 7 个对象（舞台不列出）");
     CHECK(ids().isEmpty(), "初始无选中");
     CHECK(stack->currentIndex() == 0, "无选中时 Inspector 表单清空");
 
@@ -605,19 +614,21 @@ int main(int argc, char* argv[])
               "行上按下小位移：不框选、选中保持按下行");
     }
 
-    // 空白处框选：从末行下方空白向上拖，覆盖 王五/屏风1/屏风2 三行
+    // 空白处框选：从末行（道具2）下方空白向上拖，覆盖 道具1/道具2/王五/屏风1/屏风2 五行
     {
-        const QRect lastRow = tree->visualItemRect(rowOf(QStringLiteral("screen-002")));
+        const QRect lastRow = tree->visualItemRect(rowOf(QStringLiteral("prop-002")));
         const QPoint empty(tree->viewport()->width() / 2, lastRow.bottom() + 30);
         const QPoint target(10, tree->visualItemRect(rowOf(QStringLiteral("actor-003"))).center().y());
         QTest::mousePress(tree->viewport(), Qt::LeftButton, Qt::NoModifier, empty);
         QTest::mouseMove(tree->viewport(), QPoint(10, lastRow.top() - 10));
         QTest::mouseMove(tree->viewport(), target);
         QTest::mouseRelease(tree->viewport(), Qt::LeftButton, Qt::NoModifier, target);
-        CHECK(ids().size() == 3 && ids().contains(QStringLiteral("actor-003"))
+        CHECK(ids().size() == 5 && ids().contains(QStringLiteral("actor-003"))
                   && ids().contains(QStringLiteral("screen-001"))
-                  && ids().contains(QStringLiteral("screen-002")),
-              "Hierarchy 空白处框选多行（王五+屏风1+屏风2）");
+                  && ids().contains(QStringLiteral("screen-002"))
+                  && ids().contains(QStringLiteral("prop-001"))
+                  && ids().contains(QStringLiteral("prop-002")),
+              "Hierarchy 空白处框选多行（王五+屏风1+屏风2+道具1+道具2）");
     }
 
     // 点对象即选中（单选替换）
@@ -633,7 +644,7 @@ int main(int argc, char* argv[])
               && runtime->fileData().objects.last().parentId.isEmpty(),
           "空对象落在顶层");
     CHECK(runtime->fileData().objects.last().name == QStringLiteral("空对象1"), "空对象自动命名");
-    CHECK(tree->topLevelItemCount() == 6, "Hierarchy 顶层新增空对象行");
+    CHECK(tree->topLevelItemCount() == 8, "Hierarchy 顶层新增空对象行");
     CHECK(scene->itemById(group1) == nullptr, "空对象不进视口（无图元）");
     CHECK(ids() == QList<QString> { group1 }, "创建空对象后自动选中");
     CHECK(stack->currentIndex() == 3, "单选空对象 → Inspector 只有名称表单");
@@ -655,6 +666,7 @@ int main(int argc, char* argv[])
         CHECK(fileIdOrder()
                   == QList<QString>({ QStringLiteral("actor-002"), QStringLiteral("actor-003"),
                                       QStringLiteral("screen-001"), QStringLiteral("screen-002"),
+                                      QStringLiteral("prop-001"), QStringLiteral("prop-002"),
                                       group1, QStringLiteral("actor-001") }),
               "FileData 顺序 = DFS 显示顺序（子对象排到该行子树末尾）");
     }
@@ -667,6 +679,7 @@ int main(int argc, char* argv[])
     CHECK(fileIdOrder()
               == QList<QString>({ QStringLiteral("screen-001"), QStringLiteral("actor-002"),
                                   QStringLiteral("actor-003"), QStringLiteral("screen-002"),
+                                  QStringLiteral("prop-001"), QStringLiteral("prop-002"),
                                   group1, QStringLiteral("actor-001") }),
           "拖到行间排序（FileData 顺序变化）");
 
@@ -734,14 +747,14 @@ int main(int argc, char* argv[])
               && fileIdOrder().last() == QStringLiteral("screen-002"),
           "拖到空白处移到顶层末尾");
 
-    // 删除分组级联（数据 + 树形验证）：空对象1 含 3 演员 + 空对象2
+    // 删除分组级联（数据 + 树形验证）：空对象1 含 3 演员 + 空对象2；道具不受影响
     core->selection()->select(group1);
     CHECK(core->deleteSelection(), "删除分组（业务入口）");
-    CHECK(runtime->fileData().objects.size() == 2, "级联删除整棵子树（数据）");
+    CHECK(runtime->fileData().objects.size() == 4, "级联删除整棵子树（数据，剩 2 屏风 + 2 道具）");
     CHECK(objectAt(QStringLiteral("actor-001")) == nullptr
               && objectAt(group2) == nullptr,
           "子孙对象一并删除");
-    CHECK(tree->topLevelItemCount() == 2, "Hierarchy 树同步（只剩两顶层行）");
+    CHECK(tree->topLevelItemCount() == 4, "Hierarchy 树同步（只剩四顶层行）");
     CHECK(ids().isEmpty(), "级联删除后选中清空");
 
     // ---- Create 对话框：四项（舞台道具阶段13 起可选），空对象可选 ----
@@ -3577,6 +3590,317 @@ int main(int argc, char* argv[])
             QTimer::singleShot(200, *drive);
             editShapeButton19->click();
         }
+    }
+
+    // ============ 阶段13 任务3：站立阻挡（预览标红 + 拒绝回弹 + 不溯及既往） ============
+    {
+        MainWindow w20;
+        w20.show();
+        QTest::qWaitForWindowExposed(&w20);
+        auto* core20 = w20.findChild<EditorCore*>();
+        auto* runtime20 = w20.findChild<RuntimeData*>();
+        auto* view20 = qobject_cast<StageView*>(w20.centralWidget());
+        auto* scene20 = qobject_cast<StageScene*>(view20->scene());
+        auto* timeline20 = w20.findChild<TimelineWidget*>();
+        auto* canvas20 = w20.findChild<QWidget*>(QStringLiteral("timelineCanvas"));
+        QWidget* vp20 = view20->viewport();
+        const auto posOf20 = [view20](const QPointF& scenePos) {
+            return view20->mapFromScene(scenePos);
+        };
+
+        // 造数据：演员甲段 1s→3s (100,100)→(300,100)；竖墙屏风 (200,60) 60×10
+        // 旋转 90° → x∈[195,205], y∈[30,90]（不挡弦 y=100，拖点上行入墙即挡）
+        CHECK(core20->createObject(ObjectType::Actor, QPointF(0.0, 0.0)),
+              "阶段13：阻挡用例：创建演员");
+        const QString actor20 = runtime20->fileData().objects.last().id;
+        core20->upsertKeyframe(actor20, Keyframe { 1.0, 100.0, 100.0, 0.0 });
+        core20->upsertKeyframe(actor20, Keyframe { 3.0, 300.0, 100.0, 0.0 });
+        CHECK(core20->createObject(ObjectType::Screen, QPointF(0.0, 0.0)),
+              "阶段13：阻挡用例：创建屏风");
+        const QString wall20 = runtime20->fileData().objects.last().id;
+        core20->setScreenSize(wall20, QSizeF(60.0, 10.0));
+        core20->setTransformsAtCursor({ { wall20, { 200.0, 60.0, 90.0 } } },
+                                      [] { return true; });
+
+        // 双帧态 + 点选白线
+        QTest::mouseClick(canvas20, Qt::LeftButton, Qt::NoModifier,
+                          timeline20->canvasPosFor(actor20, 1.0));
+        QTest::mouseClick(canvas20, Qt::LeftButton, Qt::ControlModifier,
+                          timeline20->canvasPosFor(actor20, 3.0));
+        CHECK(core20->activeSegment().has_value(), "阶段13：阻挡用例：双帧态就绪");
+        view20->fitInView(QRectF(40.0, -20.0, 320.0, 220.0), Qt::KeepAspectRatio);
+
+        // 右键白线 → 添加路径点（直线不穿墙，允许）
+        QTimer::singleShot(200, [] {
+            if (auto* menu = qobject_cast<QMenu*>(QApplication::activePopupWidget())) {
+                menu->setActiveAction(menu->actions().first()); // 添加路径点
+                QTest::keyClick(menu, Qt::Key_Return);
+            }
+        });
+        QContextMenuEvent addEvt(QContextMenuEvent::Mouse, posOf20(QPointF(200.0, 100.0)),
+                                 view20->mapToGlobal(posOf20(QPointF(200.0, 100.0))));
+        QApplication::sendEvent(vp20, &addEvt);
+        CHECK(core20->findPath(actor20, 1.0, 3.0) != nullptr
+                  && core20->findPath(actor20, 1.0, 3.0)->points.size() == 1,
+              "阶段13：阻挡：直线不穿墙，加点允许");
+
+        // 点选路径点（当前在弦上 (200,100) 附近，像素取整有亚厘米误差，以其为准）
+        QTest::mouseClick(vp20, Qt::LeftButton, Qt::NoModifier, posOf20(QPointF(200.0, 100.0)));
+        CHECK(core20->activePath().has_value()
+                  && core20->activePath()->pointIndex == 0,
+              "阶段13：阻挡：点选路径点");
+        const QPointF pointAfterAdd(
+            core20->findPath(actor20, 1.0, 3.0)->points.first().x,
+            core20->findPath(actor20, 1.0, 3.0)->points.first().y);
+
+        // ---- 拖点入墙：预览标红 + 松开拒绝回弹 ----
+        const int canUndoBefore = core20->canUndo();
+        QTest::mousePress(vp20, Qt::LeftButton, Qt::NoModifier, posOf20(QPointF(200.0, 100.0)));
+        QTest::mouseMove(vp20, posOf20(QPointF(200.0, 70.0))); // 越过阈值
+        QTest::mouseMove(vp20, posOf20(QPointF(200.0, 60.0))); // 入墙
+        CHECK(scene20->pathPreviewBlocked(), "阶段13：阻挡：预览穿入禁区标红");
+        // 红预览截图存档人工复核
+        view20->grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage13-blocked-preview.png")));
+        QTest::mouseRelease(vp20, Qt::LeftButton, Qt::NoModifier, posOf20(QPointF(200.0, 60.0)));
+        CHECK(near(core20->findPath(actor20, 1.0, 3.0)->points.first().x,
+                   pointAfterAdd.x(), 0.01)
+                  && near(core20->findPath(actor20, 1.0, 3.0)->points.first().y,
+                          pointAfterAdd.y(), 0.01),
+              "阶段13：阻挡：拒绝提交路径点不动（数据不变）");
+        CHECK(core20->canUndo() == canUndoBefore, "阶段13：阻挡：拒绝不入撤销栈");
+        CHECK(!scene20->pathPreviewBlocked(), "阶段13：阻挡：松开后标红清除（回弹）");
+        CHECK(!scene20->pathPointMarkerPositions().isEmpty()
+                  && near(scene20->pathPointMarkerPositions().first().y(), 100.0, 1.0),
+              "阶段13：阻挡：回弹后标记回到原位");
+
+        // ---- 拖点到墙下方空区（合法编辑不受阻） ----
+        QTest::mousePress(vp20, Qt::LeftButton, Qt::NoModifier, posOf20(QPointF(200.0, 100.0)));
+        QTest::mouseMove(vp20, posOf20(QPointF(200.0, 120.0)));
+        QTest::mouseMove(vp20, posOf20(QPointF(200.0, 140.0)));
+        CHECK(!scene20->pathPreviewBlocked(), "阶段13：阻挡：合法区域预览不标红");
+        QTest::mouseRelease(vp20, Qt::LeftButton, Qt::NoModifier, posOf20(QPointF(200.0, 140.0)));
+        CHECK(near(core20->findPath(actor20, 1.0, 3.0)->points.first().y, 140.0, 1.0),
+              "阶段13：阻挡：合法拖点提交生效");
+
+        // ---- 改角度穿道具被拒 + Inspector 回弹 ----
+        // 加 standable=false 道具（默认矩形）于 (200,30) → y∈[-20,80]：30° 弧不穿、
+        // 90° 弧顶点 58.6 穿
+        CHECK(core20->createObject(ObjectType::Prop, QPointF(200.0, 30.0)),
+              "阶段13：阻挡：创建路障道具");
+        const QString propBlocker20 = runtime20->fileData().objects.last().id;
+        core20->setPropStandable(propBlocker20, false);
+        // 注意：创建对象自动选中新道具 → 画布轨道联动选中 → 双帧态随轨道选中清除
+        // （任务1 既定规则）；重建双帧态后再点选白线
+        QTest::mouseClick(canvas20, Qt::LeftButton, Qt::NoModifier,
+                          timeline20->canvasPosFor(actor20, 1.0));
+        QTest::mouseClick(canvas20, Qt::LeftButton, Qt::ControlModifier,
+                          timeline20->canvasPosFor(actor20, 3.0));
+        CHECK(core20->activeSegment().has_value(), "阶段13：阻挡：双帧态重建");
+        // 重新点选白线（取第二段上的点 (260,116)——段2 (200,140)→(300,100) 在该 x
+        // 处的线上位置，远离路径点标记 (200,140)）
+        QTest::mouseClick(vp20, Qt::LeftButton, Qt::NoModifier, posOf20(QPointF(260.0, 116.0)));
+        CHECK(core20->activePath().has_value()
+                  && core20->activePath()->pointIndex == -1,
+              "阶段13：阻挡：重新点选白线（创建道具清了 activePath）");
+        auto* pathTypeCombo20 =
+            w20.findChild<QComboBox*>(QStringLiteral("pathTypeCombo"));
+        CHECK(pathTypeCombo20 && pathTypeCombo20->isVisible(), "阶段13：阻挡：路径页显示");
+        pathTypeCombo20->setCurrentIndex(1); // 弧线 30°（不穿道具）
+        CHECK(core20->findPath(actor20, 1.0, 3.0)->type == PathType::Arc,
+              "阶段13：阻挡：切弧线（30° 不穿道具）允许");
+        auto* legSpin20a =
+            w20.findChild<QDoubleSpinBox*>(QStringLiteral("pathLegAngleSpin0"));
+        CHECK(legSpin20a && legSpin20a->isEnabled(), "阶段13：阻挡：圆心角行启用");
+        legSpin20a->setValue(90.0); // 段1 (100,100)→(200,140) 上鼓 90°：顶点 y≈104 不穿
+        CHECK(near(core20->findPath(actor20, 1.0, 3.0)->legAngles.at(0), 90.0, 0.01),
+              "阶段13：阻挡：段1 改 90°（不穿道具）允许");
+        legSpin20a->setValue(160.0); // 段1 上鼓 160°：顶点 y≈(120−54)≈66 ∈ [-20,80] 穿道具
+        CHECK(near(core20->findPath(actor20, 1.0, 3.0)->legAngles.at(0), 90.0, 0.01),
+              "阶段13：阻挡：段1 改 160° 穿道具被拒绝（数据不变）");
+        CHECK(near(legSpin20a->value(), 90.0, 0.01),
+              "阶段13：阻挡：拒绝后 Inspector 回弹回显 90°");
+
+        // ---- 不溯及既往：standable 切换后已有路径不动 ----
+        const QList<PathData> pathsBefore20 = runtime20->fileData().paths;
+        core20->setPropStandable(propBlocker20, true);
+        CHECK(runtime20->fileData().paths == pathsBefore20,
+              "阶段13：不溯及既往：standable 切换后已有路径不动");
+        core20->setPropStandable(propBlocker20, false);
+        CHECK(runtime20->fileData().paths == pathsBefore20,
+              "阶段13：不溯及既往：切回后已有路径仍不动");
+
+        // 清理哨兵：本块新建的撤销条目逐项撤销
+        while (core20->canUndo())
+            core20->undo();
+    }
+
+    // ---- v4 旧存档兼容实测（阶段13 任务3：无道具字段 → 缺省正确；另存回读 v5） ----
+    {
+        // 真实构造 version=4、道具对象无道具字段的 JSON 存档（含 paths 节点）
+        const QString v4LegacyPath = tempDir.filePath(QStringLiteral("stage13-v4-legacy.json"));
+        {
+            QFile f(v4LegacyPath);
+            CHECK(f.open(QIODevice::WriteOnly | QIODevice::Truncate), "阶段13：写入 v4 存档");
+            f.write(R"({
+  "version": 4,
+  "stage": { "width": 1200, "depth": 800, "centerOffset": 0 },
+  "objects": [
+    {
+      "id": "prop-001", "type": "prop", "name": "旧道具", "color": "#b0814e",
+      "transform": { "x": 100, "y": 200, "rotation": 30 }, "keyframes": []
+    }
+  ],
+  "prepAreas": [],
+  "paths": [],
+  "timeline": { "duration": 60.0, "labels": [] }
+})");
+        }
+        MainWindow w21;
+        w21.show();
+        QTest::qWaitForWindowExposed(&w21);
+        CHECK(w21.openFromPath(v4LegacyPath), "阶段13：v4 旧存档（道具无道具字段）打开成功");
+        auto* runtime21 = w21.findChild<RuntimeData*>();
+        CHECK(runtime21->fileData().version == 5, "阶段13：v4 迁移后版本号升为 v5");
+        CHECK(runtime21->fileData().objects.size() == 1, "阶段13：v4 迁移后道具保留");
+        {
+            const ObjectData& prop = runtime21->fileData().objects.first();
+            CHECK(prop.scaleX == 1.0 && prop.scaleY == 1.0 && prop.standable
+                      && !prop.shape.has_value(),
+                  "阶段13：v4 迁移道具字段缺省正确（scale 1 / 可供站立 / 默认矩形）");
+        }
+        // 另存回读为 v5 格式：道具字段恒写（scaleX/scaleY/standable）
+        const QString v5Path = tempDir.filePath(QStringLiteral("stage13-v4-resaved.json"));
+        CHECK(w21.saveToPath(v5Path), "阶段13：v4 存档另存成功");
+        QFile f5(v5Path);
+        CHECK(f5.open(QIODevice::ReadOnly), "阶段13：回读另存文件");
+        const QJsonObject root21 = QJsonDocument::fromJson(f5.readAll()).object();
+        CHECK(root21.value(QStringLiteral("version")).toDouble() == 5.0,
+              "阶段13：另存后版本号升为 v5");
+        const QJsonObject propJson =
+            root21.value(QStringLiteral("objects")).toArray().first().toObject();
+        CHECK(propJson.contains(QStringLiteral("scaleX"))
+                  && propJson.contains(QStringLiteral("scaleY"))
+                  && propJson.contains(QStringLiteral("standable")),
+              "阶段13：另存后道具字段恒写");
+        CHECK(!runtime21->isDirty(), "阶段13：另存后干净");
+    }
+
+    // ============ 阶段13 修复：位置变更类提交的阻挡（视口拖拽标红回弹/Inspector 回弹） ============
+    {
+        MainWindow w21f;
+        w21f.show();
+        QTest::qWaitForWindowExposed(&w21f);
+        auto* core21f = w21f.findChild<EditorCore*>();
+        auto* runtime21f = w21f.findChild<RuntimeData*>();
+        auto* view21f = qobject_cast<StageView*>(w21f.centralWidget());
+        auto* scene21f = qobject_cast<StageScene*>(view21f->scene());
+        QWidget* vp21f = view21f->viewport();
+        const auto posOf21 = [view21f](const QPointF& scenePos) {
+            return view21f->mapFromScene(scenePos);
+        };
+
+        // 手搭场景（直改数据）：演员甲帧 t=1 (100,300)、t=3 (300,300)；竖墙屏风
+        // (200,100) 旋转 90° 100×10 → x∈[195,205], y∈[50,150]；弦 y=300 不穿墙
+        {
+            FileData setup = runtime21f->fileData();
+            ObjectData actor;
+            actor.id = QStringLiteral("actor-001");
+            actor.type = ObjectType::Actor;
+            actor.name = QStringLiteral("演员甲");
+            actor.keyframes = { Keyframe { 1.0, 100.0, 300.0, 0.0 },
+                                Keyframe { 3.0, 300.0, 300.0, 0.0 } };
+            ObjectData wall;
+            wall.id = QStringLiteral("screen-001");
+            wall.type = ObjectType::Screen;
+            wall.name = QStringLiteral("竖墙");
+            wall.size = QSizeF(100.0, 10.0);
+            wall.transform = { 200.0, 100.0, 90.0 };
+            setup.objects = { actor, wall };
+            runtime21f->commitFileData(setup);
+        }
+        core21f->timelinePlayer()->seekTo(1.0); // 游标在帧 t=1 上
+        view21f->fitInView(QRectF(0.0, 0.0, 400.0, 400.0), Qt::KeepAspectRatio);
+        core21f->selection()->select(QStringLiteral("actor-001"));
+        const auto itemBlocked = [scene21f] {
+            StageObjectItem* item =
+                scene21f->itemById(QStringLiteral("actor-001"));
+            return item && item->isBlockedPreview();
+        };
+
+        // ---- 视口拖拽入墙：预览标红 + 松开拒绝回弹 + 零撤销条目 ----
+        runtime21f->settings().setGridSnapEnabled(false); // 精确落点
+        const bool undoBefore21 = core21f->canUndo();
+        QTest::mousePress(vp21f, Qt::LeftButton, Qt::NoModifier, posOf21(QPointF(100.0, 300.0)));
+        QTest::mouseMove(vp21f, posOf21(QPointF(150.0, 250.0))); // 越过阈值（途中不穿）
+        CHECK(!itemBlocked(), "阶段13 修复：拖拽途中未穿墙不标红");
+        QTest::mouseMove(vp21f, posOf21(QPointF(200.0, 100.0))); // 拖入墙
+        CHECK(itemBlocked(), "阶段13 修复：拖拽入墙预览标红");
+        // 标红截图存档人工复核
+        view21f->grab().save(
+            QDir::temp().absoluteFilePath(QStringLiteral("stage13fix-drag-blocked.png")));
+        QTest::mouseRelease(vp21f, Qt::LeftButton, Qt::NoModifier, posOf21(QPointF(200.0, 100.0)));
+        {
+            const Keyframe& frame = runtime21f->fileData().objects.first().keyframes.first();
+            CHECK(near(frame.x, 100.0, 0.01) && near(frame.y, 300.0, 0.01),
+                  "阶段13 修复：松开拒绝提交（数据不变）");
+        }
+        CHECK(near(scene21f->itemById(QStringLiteral("actor-001"))->pos().x(), 100.0, 1.0)
+                  && near(scene21f->itemById(QStringLiteral("actor-001"))->pos().y(), 300.0, 1.0),
+              "阶段13 修复：拒绝后图元回弹到插值显示位置");
+        CHECK(core21f->canUndo() == undoBefore21, "阶段13 修复：拒绝零撤销条目");
+        CHECK(!itemBlocked(), "阶段13 修复：松开后标红清除");
+
+        // ---- 合法拖拽照常 ----
+        QTest::mousePress(vp21f, Qt::LeftButton, Qt::NoModifier, posOf21(QPointF(100.0, 300.0)));
+        QTest::mouseMove(vp21f, posOf21(QPointF(130.0, 300.0)));
+        QTest::mouseMove(vp21f, posOf21(QPointF(150.0, 300.0))); // 不穿墙
+        CHECK(!itemBlocked(), "阶段13 修复：合法拖拽不标红");
+        QTest::mouseRelease(vp21f, Qt::LeftButton, Qt::NoModifier, posOf21(QPointF(150.0, 300.0)));
+        CHECK(near(runtime21f->fileData().objects.first().keyframes.first().x, 150.0, 1.0),
+              "阶段13 修复：合法拖拽照常提交");
+        core21f->undo(); // 回 100（恢复后续用例场景）
+        CHECK(near(runtime21f->fileData().objects.first().keyframes.first().x, 100.0, 0.01),
+              "阶段13 修复：undo 回合法拖拽前");
+
+        // ---- Inspector 提交被拒回弹：游标 t=2（段中点显示 (200,300)），Y 改 100 入墙 ----
+        core21f->timelinePlayer()->seekTo(2.0);
+        auto* actorYSpin21 =
+            w21f.findChild<QDoubleSpinBox*>(QStringLiteral("actorYSpin"));
+        CHECK(actorYSpin21 && near(actorYSpin21->value(), 300.0, 0.01),
+              "阶段13 修复：Inspector 回显段中点显示值");
+        const int keyCountBefore21 =
+            runtime21f->fileData().objects.first().keyframes.size();
+        actorYSpin21->setValue(100.0); // 段中点 (200,300) → (200,100) 入墙
+        CHECK(runtime21f->fileData().objects.first().keyframes.size() == keyCountBefore21,
+              "阶段13 修复：Inspector 提交入墙被拒（不打新帧）");
+        CHECK(near(actorYSpin21->value(), 300.0, 0.01),
+              "阶段13 修复：Inspector 拒绝后回弹回显旧值");
+        CHECK(core21f->canUndo() == undoBefore21, "阶段13 修复：Inspector 拒绝零撤销条目");
+
+        // ---- 多选拖拽：任一对象受阻整批拒绝 ----
+        {
+            // 加演员乙（帧 t=1 (100,520)）；双选后拖：甲入墙、乙入空区 → 整批拒绝
+            core21f->createObject(ObjectType::Actor, QPointF(0.0, 0.0));
+            const QString actorB21 = runtime21f->fileData().objects.last().id;
+            core21f->upsertKeyframe(actorB21, Keyframe { 1.0, 100.0, 520.0, 0.0 });
+            core21f->timelinePlayer()->seekTo(1.0);
+            core21f->selection()->setSelection(
+                { QStringLiteral("actor-001"), actorB21 });
+            QTest::mousePress(vp21f, Qt::LeftButton, Qt::NoModifier, posOf21(QPointF(100.0, 300.0)));
+            QTest::mouseMove(vp21f, posOf21(QPointF(150.0, 200.0)));
+            QTest::mouseMove(vp21f, posOf21(QPointF(200.0, 100.0))); // 甲入墙，乙 (200,320) 空区
+            CHECK(itemBlocked(), "阶段13 修复：多选拖拽受阻对象标红");
+            QTest::mouseRelease(vp21f, Qt::LeftButton, Qt::NoModifier,
+                                posOf21(QPointF(200.0, 100.0)));
+            const ObjectData* a21 = core21f->findObject(QStringLiteral("actor-001"));
+            const ObjectData* b21 = core21f->findObject(actorB21);
+            CHECK(a21->keyframes.first().x == 100.0 && b21->keyframes.first().x == 100.0,
+                  "阶段13 修复：任一受阻整批拒绝（双方数据不变）");
+            CHECK(!itemBlocked(), "阶段13 修复：整批拒绝后标红清除");
+        }
+
+        runtime21f->settings().setGridSnapEnabled(true); // 清理哨兵
     }
 
     out() << Qt::endl;

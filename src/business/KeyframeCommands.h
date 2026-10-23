@@ -8,6 +8,11 @@
 // （对 redo 幂等）。关键帧/标签命令的捕获粒度是"被触及对象的整条关键帧列表
 // （+ 旧时长）/整个标签列表"——列表很小，整体快照换来严格互逆与排序不变式。
 //
+// 阶段12 级联：路径丢弃/重绑定与关键帧改动同命令快照，撤销/重做严格互逆；
+// 阶段13 修复：UpsertKeyframesCommand 统一收口位置变更的阻挡校验（穿阻挡则
+// 整条命令回滚，数据不变、不入撤销栈——视口拖拽/方向键/Inspector/打帧/粘贴
+// 关键帧全部覆盖）；keyframeEditsBlocked 供预览查询（模拟应用副本判定）。
+//
 // 时长自动延长（需求：关键帧/标签落点超出 duration 时自动延长）归属命令内部：
 // 同一命令里改 duration，撤销时一并还原，保证 apply/revert 严格互逆。
 
@@ -156,6 +161,12 @@ private:
     double m_oldDuration = 0.0;
     bool m_captured = false;
 };
+
+// 阶段13 修复：位置变更类关键帧写入的阻挡预检——把条目模拟应用到 data 副本后
+// 按受影响段扫掠判定（与 UpsertKeyframesCommand::apply 同路径，不改调用方数据）。
+// 供 EditorCore::wouldTransformBlocked（视口拖拽预览查询）使用；返回 true =
+// 位置实际变化且受影响段与障碍物扫掠相交。
+bool keyframeEditsBlocked(const FileData& data, const QList<ObjectKeyframe>& items);
 
 // 删除场次标签：按下标；revert 原位还原整个标签列表。
 class RemoveSceneLabelCommand : public Command {

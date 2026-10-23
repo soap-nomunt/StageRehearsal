@@ -69,4 +69,5 @@ void ScreenItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* /*opti
     rect.addRect(QRectF(-m_size.width() / 2.0, -m_size.height() / 2.0,
                         m_size.width(), m_size.height()));
     drawHighlight(painter, rect);
+    drawBlockedOverlay(painter, rect); // 阶段13：阻挡预览标红
 }

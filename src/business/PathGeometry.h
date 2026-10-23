@@ -12,6 +12,7 @@
 #include "data/DataTypes.h"
 
 #include <QList>
+#include <QPainterPath>
 #include <QPointF>
 #include <QString>
 
@@ -315,6 +316,120 @@ inline void normalizePropShapeWinding(PropShape& shape)
     }
     shape.vertices = reversedVertices;
     shape.edgeAngles = reversedAngles;
+}
+
+// ---- 站立阻挡判定（阶段13 任务3，纯函数）----
+// 障碍物 = 全部屏风（旋转矩形）∪ standable=false 道具（顶点×scale 后的实际
+// 多边形，弧边采样折线化）；演员互不阻挡。判定 = 段内等分 10 时刻扫掠：
+// 每时刻障碍物按 TimelinePlayer 插值取位姿，路径采样折线（与渲染/插值同一实现）
+// 的点（含两端点）落入障碍物多边形 或 折线与障碍物边相交 → 阻挡。
+// 不溯及既往：只约束路径编辑操作（由 PathCommands 提交前调用），已有路径不动。
+struct ObstaclePolygon {
+    QString objectId;
+    QList<QPointF> localOutline; // 局部多边形顶点（未旋转/平移，原点 = 对象位置）
+};
+
+// 局部点 → 场景：需求角度制旋转 + 平移。朝向向量 = (−sinθ, cosθ)（0°=+y 朝下，
+// 逆时针增大），局部 +y = 前、+x = 右 = (−cosθ, −sinθ)（与 RenderUtil 同推导，
+// 业务层自含实现，不依赖渲染层）
+inline QPointF transformPoint(const QPointF& local, double x, double y, double rotationDeg)
+{
+    const double rad = rotationDeg * kPi / 180.0;
+    const double s = std::sin(rad);
+    const double c = std::cos(rad);
+    return QPointF(x + local.x() * (-c) + local.y() * (-s),
+                   y + local.x() * (-s) + local.y() * c);
+}
+
+// 障碍物集合（排除 excludeId——被编辑路径的对象自身不是自己的障碍物）
+inline QList<ObstaclePolygon> collectObstacles(const FileData& data,
+                                               const QString& excludeId)
+{
+    QList<ObstaclePolygon> result;
+    for (const ObjectData& object : data.objects) {
+        if (object.id == excludeId)
+            continue;
+        if (object.type == ObjectType::Screen) {
+            // 屏风永远阻挡：旋转矩形 4 顶点（无开关）
+            const double w = object.size ? object.size->width() : 100.0;
+            const double h = object.size ? object.size->height() : 10.0;
+            result.append(
+                { object.id,
+                  { { -w / 2.0, -h / 2.0 }, { -w / 2.0, h / 2.0 },
+                    { w / 2.0, h / 2.0 }, { w / 2.0, -h / 2.0 } } });
+        } else if (object.type == ObjectType::Prop && !object.standable) {
+            // 不可站立道具阻挡：实际多边形（顶点×scale，弧边采样折线化）
+            const PropShape shape = object.shape.value_or(defaultPropShape());
+            QList<QPointF> outline;
+            const int count = shape.vertices.size();
+            for (int i = 0; i < count; ++i) {
+                const PathPoint& a = shape.vertices.at(i);
+                const PathPoint& b = shape.vertices.at((i + 1) % count);
+                const QPointF pa(a.x * object.scaleX, a.y * object.scaleY);
+                const QPointF pb(b.x * object.scaleX, b.y * object.scaleY);
+                const double angle =
+                    i < shape.edgeAngles.size() ? shape.edgeAngles.at(i) : 0.0;
+                const QList<QPointF> leg = sampleLeg(pa, pb, angle);
+                for (int j = (outline.isEmpty() ? 0 : 1); j < leg.size(); ++j)
+                    outline.append(leg.at(j));
+            }
+            result.append({ object.id, outline });
+        }
+    }
+    return result;
+}
+
+// 段路径扫掠阻挡判定（纯函数）：polyline = 复合曲线采样折线（PathGeometry
+// 同一实现）；段内等分 10 时刻（含两端点时刻），障碍物该时刻插值位姿下的
+// 多边形与路径点/折线相交 → true
+inline bool pathBlocked(const FileData& data, const QString& objectId, double from,
+                        double to, const QList<QPointF>& polyline)
+{
+    if (polyline.size() < 2)
+        return false;
+    const QList<ObstaclePolygon> obstacles = collectObstacles(data, objectId);
+    if (obstacles.isEmpty())
+        return false;
+    for (int k = 0; k <= 10; ++k) { // 段内等分 10 时刻扫掠（含两端点）
+        const double t = from + (to - from) * k / 10.0;
+        for (const ObstaclePolygon& obstacle : obstacles) {
+            const ObjectData* object = nullptr;
+            for (const ObjectData& entry : data.objects) {
+                if (entry.id == obstacle.objectId) {
+                    object = &entry;
+                    break;
+                }
+            }
+            if (!object)
+                continue;
+            const Transform pose =
+                TimelinePlayer::interpolate(*object, data.paths, t);
+            // 障碍物该时刻位姿下的场景多边形
+            QList<QPointF> scenePoly;
+            for (const QPointF& p : obstacle.localOutline)
+                scenePoly.append(transformPoint(p, pose.x, pose.y, pose.rotation));
+            // 路径点（含两端点）落入障碍物
+            QPainterPath obstaclePath;
+            obstaclePath.moveTo(scenePoly.first());
+            for (int i = 1; i < scenePoly.size(); ++i)
+                obstaclePath.lineTo(scenePoly.at(i));
+            obstaclePath.closeSubpath();
+            for (const QPointF& p : polyline) {
+                if (obstaclePath.contains(p))
+                    return true;
+            }
+            // 路径折线与障碍物边相交
+            for (int i = 0; i + 1 < polyline.size(); ++i) {
+                for (int j = 0; j < scenePoly.size(); ++j) {
+                    if (segmentsIntersect(polyline.at(i), polyline.at(i + 1),
+                                          scenePoly.at(j),
+                                          scenePoly.at((j + 1) % scenePoly.size())))
+                        return true;
+                }
+            }
+        }
+    }
+    return false;
 }
 
 } // namespace PathGeometry

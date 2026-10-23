@@ -5,6 +5,8 @@
 #include "StageObjectItem.h"
 #include "StageScene.h"
 #include "business/EditorCore.h"
+#include "business/PathCommands.h" // resolveSegmentEndpoints
+#include "business/PathGeometry.h"
 #include "business/SelectionModel.h"
 #include "business/TimelinePlayer.h"
 #include "data/AppSettings.h"
@@ -215,6 +217,24 @@ void StageView::mouseMoveEvent(QMouseEvent* event)
             if (StageObjectItem* item = m_scene->itemById(it.key()))
                 item->setPos(it.value() + delta); // 只动图元，不写数据
         }
+        // 阶段13 修复：拖拽预览实时阻挡查询（与提交同一命令路径模拟），
+        // 穿入禁区 → 被拖图元标红
+        QList<ObjectTransform> previewUpdates;
+        for (auto it = m_dragStartPositions.constBegin(); it != m_dragStartPositions.constEnd();
+             ++it) {
+            if (StageObjectItem* item = m_scene->itemById(it.key())) {
+                previewUpdates.append(
+                    { it.key(),
+                      { item->pos().x(), item->pos().y(), item->rotation() } });
+                        // 图元角度即显示值（需求角度制与 Qt 恒等映射）
+            }
+        }
+        const bool blocked = m_editorCore->wouldTransformBlocked(previewUpdates);
+        for (auto it = m_dragStartPositions.constBegin(); it != m_dragStartPositions.constEnd();
+             ++it) {
+            if (StageObjectItem* item = m_scene->itemById(it.key()))
+                item->setBlockedPreview(blocked);
+        }
         break;
     }
     case DragMode::Rotating: {
@@ -254,14 +274,41 @@ void StageView::mouseMoveEvent(QMouseEvent* event)
         break;
     }
     case DragMode::MovingPathPoint: {
-        // 拖动中只动本地预览（吸附与对象一致），松开才提交命令
+        // 拖动中只动本地预览（吸附与对象一致），松开才提交命令；
+        // 阶段13 任务3：预览实时查询阻挡判定（同一采样实现），穿入禁区标红
         if (!m_editorCore->activeSegment()) {
             m_dragMode = DragMode::None; // 段中途消失（防御）
             m_scene->setPathPointPreview(std::nullopt);
+            m_scene->setPathPreviewBlocked(false);
             break;
         }
-        m_scene->setPathPointPreview(
-            std::make_pair(m_pathPointIndex, snappedPoint(mapToScene(pos))));
+        const SegmentRef& segment = *m_editorCore->activeSegment();
+        const QPointF snapped = snappedPoint(mapToScene(pos));
+        m_scene->setPathPointPreview(std::make_pair(m_pathPointIndex, snapped));
+        // 预览位置代入路径副本 → 采样折线 → 扫掠阻挡判定
+        const FileData& file = m_editorCore->runtimeData()->fileData();
+        QPointF fromPos;
+        QPointF toPos;
+        if (resolveSegmentEndpoints(file, segment.objectId, segment.from, segment.to,
+                                    fromPos, toPos)) {
+            PathData preview;
+            if (const PathData* current = PathGeometry::findPathData(
+                    file.paths, segment.objectId, segment.from, segment.to))
+                preview = *current;
+            else {
+                preview.objectId = segment.objectId;
+                preview.from = segment.from;
+                preview.to = segment.to;
+                preview.legAngles = { 0.0 };
+            }
+            if (m_pathPointIndex >= 0 && m_pathPointIndex < preview.points.size()) {
+                preview.points[m_pathPointIndex] =
+                    PathPoint { snapped.x(), snapped.y() };
+                m_scene->setPathPreviewBlocked(PathGeometry::pathBlocked(
+                    file, segment.objectId, segment.from, segment.to,
+                    PathGeometry::samplePath(preview, fromPos, toPos)));
+            }
+        }
         break;
     }
     case DragMode::None:
@@ -307,7 +354,7 @@ void StageView::mouseReleaseEvent(QMouseEvent* event)
 
     case DragMode::Moving: {
         // 松开一次性提交命令（游标时刻语义：T 处有帧更新、无帧按设置/弹窗决定打帧）；
-        // 拖动过程中的图元位移由全量重建覆盖，被拒（选"否"）时手动回弹
+        // 拖动过程中的图元位移由全量重建覆盖，被拒（选"否"/穿阻挡）时手动回弹
         const QPointF primaryStart = m_dragStartPositions.value(m_primaryId);
         const QPointF rawTarget = primaryStart + (mapToScene(event->position().toPoint()) - m_pressScenePos);
         const QPointF delta = snappedPoint(rawTarget) - primaryStart;
@@ -320,7 +367,12 @@ void StageView::mouseReleaseEvent(QMouseEvent* event)
             }
         }
         if (!m_editorCore->setTransformsAtCursor(updates, keyframeConfirmCallback()))
-            m_scene->applyDisplayTransforms(); // 无变更/选"否"：回弹到插值显示位置
+            m_scene->applyDisplayTransforms(); // 无变更/选"否"/穿阻挡被拒：回弹到插值显示位置
+        for (auto it = m_dragStartPositions.constBegin(); it != m_dragStartPositions.constEnd();
+             ++it) {
+            if (StageObjectItem* item = m_scene->itemById(it.key()))
+                item->setBlockedPreview(false); // 阶段13 修复：手势结束清除标红
+        }
         m_dragStartPositions.clear();
         m_primaryId.clear();
         break;
@@ -374,12 +426,14 @@ void StageView::mouseReleaseEvent(QMouseEvent* event)
         break; // 纯点击 = 选中路径点（按下时已写入 activePath.pointIndex）
 
     case DragMode::MovingPathPoint: {
-        // 阶段12：松开一次性提交（以松开点吸附值为准；预览清除，由重建回喂）
+        // 阶段12：松开一次性提交（以松开点吸附值为准；预览清除，由重建回喂）；
+        // 阶段13 任务3：穿入禁区时命令拒绝提交 → 先清预览/标红即回弹原位
         m_scene->setPathPointPreview(std::nullopt);
+        m_scene->setPathPreviewBlocked(false);
         if (const auto& segment = m_editorCore->activeSegment()) {
             const QPointF scenePos = snappedPoint(mapToScene(event->position().toPoint()));
             m_editorCore->movePathPoint(segment->objectId, segment->from, segment->to,
-                                        m_pathPointIndex, scenePos);
+                                        m_pathPointIndex, scenePos); // 阻挡则拒绝（数据不变）
         }
         m_pathPointIndex = -1;
         break;

@@ -321,6 +321,28 @@ bool EditorCore::moveSelectionBy(const QPointF& deltaCm,
     return setTransformsAtCursor(updates, confirm);
 }
 
+bool EditorCore::wouldTransformBlocked(const QList<ObjectTransform>& updates) const
+{
+    // 与 setTransformsAtCursor 同一过滤（空对象/不存在/值等于当前显示值跳过）；
+    // 模拟应用（含级联）后判定——纯旋转/零位移条目不触发校验
+    const double t = m_timelinePlayer.currentTime();
+    QList<ObjectKeyframe> items;
+    for (const ObjectTransform& update : updates) {
+        const ObjectData* object = findObject(update.id);
+        if (!object || object->type == ObjectType::Group)
+            continue;
+        const Transform shown = TimelinePlayer::interpolate(
+            *object, m_runtimeData->fileData().paths, t);
+        if (update.value == shown)
+            continue;
+        items.append({ update.id,
+                       { t, update.value.x, update.value.y, update.value.rotation } });
+    }
+    if (items.isEmpty())
+        return false;
+    return keyframeEditsBlocked(m_runtimeData->fileData(), items);
+}
+
 bool EditorCore::canKeyframeSelection() const
 {
     const QString id = m_selection.singleSelectedId();

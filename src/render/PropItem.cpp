@@ -56,6 +56,7 @@ void PropItem::paint(QPainter* painter, const QStyleOptionGraphicsItem* /*option
 
     // 选中高亮：加粗实线描边
     drawHighlight(painter, m_outline);
+    drawBlockedOverlay(painter, m_outline); // 阶段13：阻挡预览标红
 }
 
 bool PropItem::hitRotationHandle(const QPointF& /*scenePos*/) const

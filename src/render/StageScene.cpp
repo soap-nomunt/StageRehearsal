@@ -161,6 +161,14 @@ void StageScene::setPathPointPreview(const std::optional<QPair<int, QPointF>>& p
     refreshSegmentOverlay();
 }
 
+void StageScene::setPathPreviewBlocked(bool blocked)
+{
+    if (m_pathPreviewBlocked == blocked)
+        return;
+    m_pathPreviewBlocked = blocked;
+    refreshSegmentOverlay();
+}
+
 QList<QPointF> StageScene::pathPointMarkerPositions() const
 {
     QList<QPointF> positions;
@@ -228,11 +236,13 @@ void StageScene::refreshSegmentOverlay()
     else
         m_segmentPolyline = { fromPos, toPos };
 
-    // 恒宽白线（cosmetic 不随缩放变化）：直线/弧线统一的折线；压在对象与幽灵之下
+    // 恒宽白线（cosmetic 不随缩放变化）：直线/弧线统一的折线；压在对象与幽灵之下；
+    // 拖拽预览穿入禁区（阻挡）时标红（阶段13 任务3）
     QPainterPath linePath(m_segmentPolyline.first());
     for (int i = 1; i < m_segmentPolyline.size(); ++i)
         linePath.lineTo(m_segmentPolyline.at(i));
-    QPen linePen(Qt::white);
+    QPen linePen(m_pathPreviewBlocked ? QColor(QStringLiteral("#e74c3c"))
+                                      : QColor(Qt::white));
     linePen.setCosmetic(true);
     linePen.setWidth(2);
     m_segmentPathItem = addPath(linePath, linePen);

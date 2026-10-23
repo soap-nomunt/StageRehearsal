@@ -63,11 +63,15 @@ public:
     void setActivePath(const std::optional<ActivePathRef>& path);
     // 路径点拖拽预览（只动本地预览不写数据，松开提交后由重建回喂正式值）
     void setPathPointPreview(const std::optional<QPair<int, QPointF>>& preview);
+    // 阻挡预览标红（阶段13 任务3）：拖拽预览穿入禁区时路径线变红；松开回弹清除
+    void setPathPreviewBlocked(bool blocked);
 
     // 自测钩子：段路径折线（场景坐标 cm，含采样点；无段 = 空表）
     QList<QPointF> segmentPathPolyline() const { return m_segmentPolyline; }
     // 自测钩子：路径点标记位置（场景坐标 cm；无选中路径 = 空表）
     QList<QPointF> pathPointMarkerPositions() const;
+    // 自测钩子：当前路径线是否阻挡标红
+    bool pathPreviewBlocked() const { return m_pathPreviewBlocked; }
 
 protected:
     void drawBackground(QPainter* painter, const QRectF& rect) override;
@@ -88,4 +92,5 @@ private:
     QList<QGraphicsEllipseItem*> m_pointMarkers;    // 路径点标记（选中路径时）
     QList<QPointF> m_segmentPolyline;               // 最近一次渲染的折线（视口命中测试共享）
     std::optional<QPair<int, QPointF>> m_pathPointPreview; // 拖拽预览中的路径点（下标+位置）
+    bool m_pathPreviewBlocked = false;              // 预览穿入禁区标红（阶段13 任务3）
 };

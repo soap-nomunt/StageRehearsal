@@ -563,9 +563,11 @@ void InspectorPanel::rebuildPathAngleRows(int legCount)
             if (m_updating)
                 return;
             const auto& activePath = *m_editorCore->activePath();
-            m_editorCore->setPathLegAngle(activePath.segment.objectId,
-                                          activePath.segment.from, activePath.segment.to,
-                                          i, value);
+            // 阶段13 任务3：穿入阻挡区被拒 → 回弹回显当前值
+            if (!m_editorCore->setPathLegAngle(activePath.segment.objectId,
+                                               activePath.segment.from,
+                                               activePath.segment.to, i, value))
+                refresh();
         });
     }
 }
@@ -575,8 +577,10 @@ void InspectorPanel::commitPathType(int index)
     if (m_updating || !m_editorCore->activePath())
         return;
     const auto& segment = m_editorCore->activePath()->segment;
-    m_editorCore->setPathType(segment.objectId, segment.from, segment.to,
-                              index == 1 ? PathType::Arc : PathType::Line);
+    // 阶段13 任务3：穿入阻挡区被拒 → 回弹回显当前类型
+    if (!m_editorCore->setPathType(segment.objectId, segment.from, segment.to,
+                                   index == 1 ? PathType::Arc : PathType::Line))
+        refresh();
 }
 
 void InspectorPanel::commitPathPointT()
@@ -586,9 +590,10 @@ void InspectorPanel::commitPathPointT()
     const auto& activePath = *m_editorCore->activePath();
     if (activePath.pointIndex < 0)
         return;
-    m_editorCore->setPathPointT(activePath.segment.objectId, activePath.segment.from,
-                                activePath.segment.to, activePath.pointIndex,
-                                m_pathPointT->value());
+    if (!m_editorCore->setPathPointT(activePath.segment.objectId, activePath.segment.from,
+                                     activePath.segment.to, activePath.pointIndex,
+                                     m_pathPointT->value()))
+        refresh(); // 阶段13 任务3：被拒回弹
 }
 
 // ---- 阶段13：道具页 ----
