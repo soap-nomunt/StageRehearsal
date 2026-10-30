@@ -75,8 +75,14 @@ public:
 
     double pxPerSec() const { return m_pxPerSec; }
 
-    // 阶段12：播放开始/fileReplaced 等外部路径清除双帧态（不动画布选择本身）
-    void clearActiveSegment() { m_core->setActiveSegment(std::nullopt); }
+    void clearKeySelection()
+    {
+        m_selectedKeys.clear();
+        if (m_sel == CanvasSel::Keys)
+            m_sel = CanvasSel::None;
+        updateActiveSegment();
+        update();
+    }
 
     double timeToX(double t) const { return TimelineWidget::kNameColW + t * m_pxPerSec; }
     double xToTime(double x) const { return (x - TimelineWidget::kNameColW) / m_pxPerSec; }
@@ -1091,14 +1097,18 @@ TimelineWidget::TimelineWidget(EditorCore* editorCore, QWidget* parent)
             this, [this](double) { updateTransport(); });
     connect(player, &TimelinePlayer::playingChanged,
             this, [this](bool) { updateTransport(); });
-    // 阶段12：播放开始自动清除双帧态（不动画布关键帧选择本身）
+    // 播放开始/fileReplaced/资源选中同步清除画布关键帧选择，防止双帧段重建回潮
     connect(player, &TimelinePlayer::playingChanged, m_canvas, [this](bool playing) {
         if (playing)
-            m_canvas->clearActiveSegment();
+            m_canvas->clearKeySelection();
     });
     // 阶段12：新建/打开文件双帧态随文件替换清除（rebuildRows 亦有防御，此为明示路径）
     connect(runtime, &RuntimeData::fileReplaced, m_canvas,
-            [this] { m_canvas->clearActiveSegment(); });
+            [this] { m_canvas->clearKeySelection(); });
+    connect(m_editorCore, &EditorCore::activeResourceChanged, m_canvas, [this] {
+        if (!m_editorCore->activeResourceId().isEmpty())
+            m_canvas->clearKeySelection();
+    });
     connect(player, &TimelinePlayer::speedChanged, this, [this](double speed) {
         const int index = m_speedCombo->findData(speed);
         if (index >= 0)

@@ -4,7 +4,6 @@
 #include "data/ResourceFiles.h"
 #include "data/RuntimeData.h"
 
-#include <QCloseEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
@@ -92,14 +91,10 @@ protected:
 } // namespace
 
 ResourceWindow::ResourceWindow(EditorCore* editorCore, SaveGate ensureSaved, QWidget* parent)
-    : QDialog(parent)
+    : QWidget(parent)
     , m_editorCore(editorCore)
     , m_ensureSaved(std::move(ensureSaved))
 {
-    setWindowTitle(QStringLiteral("资源库"));
-    setModal(false);
-    resize(520, 420);
-
     auto* layout = new QVBoxLayout(this);
     auto* buttons = new QHBoxLayout();
     m_importButton = new QPushButton(QStringLiteral("导入…"), this);
@@ -130,7 +125,8 @@ ResourceWindow::ResourceWindow(EditorCore* editorCore, SaveGate ensureSaved, QWi
     connect(m_list, &QListWidget::itemSelectionChanged, this, [this] {
         if (m_updating)
             return;
-        const QListWidgetItem* item = m_list->currentItem();
+        const QList<QListWidgetItem*> selected = m_list->selectedItems();
+        const QListWidgetItem* item = selected.isEmpty() ? nullptr : selected.first();
         m_editorCore->setActiveResource(item ? item->data(Qt::UserRole).toString() : QString());
     });
     list->onDelete = [this] { removeActive(); };
@@ -141,20 +137,6 @@ ResourceWindow::ResourceWindow(EditorCore* editorCore, SaveGate ensureSaved, QWi
             this, &ResourceWindow::refreshList);
 
     refreshList();
-}
-
-void ResourceWindow::openWindow()
-{
-    refreshList();
-    show();
-    raise();
-    activateWindow();
-}
-
-void ResourceWindow::closeEvent(QCloseEvent* event)
-{
-    event->ignore();
-    hide(); // 非模态单例：关闭只隐藏，下次菜单打开复用
 }
 
 void ResourceWindow::refreshList()

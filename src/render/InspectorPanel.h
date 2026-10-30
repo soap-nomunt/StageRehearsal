@@ -137,7 +137,7 @@ private:
     QPushButton* m_resourcePause = nullptr;       // resourcePauseButton
     QPushButton* m_resourceStop = nullptr;        // resourceStopButton
     QString m_resourceShownId;                    // 图片缓存对应的资源 id
-    QString m_resourceShownPath;                  // 图片缓存对应的相对路径
+    QString m_resourceShownPath;                  // 图片缓存对应的绝对路径
     bool m_resourceImageValid = false;
 
     bool m_updating = false; // 刷新表单期间屏蔽提交槽，防信号回环

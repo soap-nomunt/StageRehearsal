@@ -20,6 +20,7 @@
 #include <QCloseEvent>
 #include <QCoreApplication>
 #include <QDockWidget>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMenu>
@@ -84,8 +85,12 @@ MainWindow::MainWindow(QWidget* parent)
     AppSettings settings;
     if (!settings.windowGeometry().isEmpty())
         restoreGeometry(settings.windowGeometry());
-    if (!settings.windowState().isEmpty())
-        restoreState(settings.windowState());
+    const QByteArray savedState = settings.windowState();
+    if (!savedState.isEmpty()) {
+        restoreState(savedState);
+        if (!savedState.contains("resourceDock"))
+            applyDefaultResourceLayout();
+    }
 }
 
 void MainWindow::dumpScreenshotForSelfTest(const QString& path)
@@ -130,25 +135,43 @@ void MainWindow::dumpScreenshotForSelfTest(const QString& path)
 
 bool MainWindow::saveToPath(const QString& path)
 {
-    // 阶段14：另存为改变资源根目录时，先完整复制当前资源目录（含未引用文件，
-    // 保证撤销历史仍可恢复资源）；复制失败中止，不切换当前存档路径
-    const QString currentPath = m_runtimeData->currentFilePath();
-    if (!currentPath.isEmpty() && !sameArchivePath(currentPath, path)) {
-        QString error;
-        if (!ResourceFiles::copyResourceTree(currentPath, path, error)) {
-            QMessageBox::critical(
-                this, QStringLiteral("保存失败"),
-                QStringLiteral("复制项目资源目录失败，未保存到 %1：\n%2").arg(path, error));
-            return false;
-        }
-    }
-    // 保存不是编辑操作：不经过命令栈、不清撤销栈
-    const SaveResult result = m_runtimeData->saveFile(path, m_runtimeData->fileData());
-    if (!result.ok) {
+    if (path.isEmpty())
+        return false;
+    if (!QDir().mkpath(QFileInfo(path).absolutePath())) {
         QMessageBox::critical(this, QStringLiteral("保存失败"),
-                              QStringLiteral("无法保存到 %1：\n%2").arg(path, result.message));
+                              QStringLiteral("无法创建项目文件夹：%1")
+                                  .arg(QFileInfo(path).absolutePath()));
         return false;
     }
+
+    const QString currentPath = m_runtimeData->currentFilePath();
+    ResourceFiles::ResourceTreeUpdate resourceUpdate;
+    QString error;
+    if (!currentPath.isEmpty() && sameArchivePath(currentPath, path)) {
+        if (!ResourceFiles::migrateLegacyResourceTree(path, error)) {
+            QMessageBox::critical(this, QStringLiteral("保存失败"),
+                                  QStringLiteral("迁移项目资源目录失败：\n%1").arg(error));
+            return false;
+        }
+    } else if (!ResourceFiles::copyResourceTree(currentPath, path, resourceUpdate, error)) {
+        QMessageBox::critical(
+            this, QStringLiteral("保存失败"),
+            QStringLiteral("复制项目资源目录失败，未保存到 %1：\n%2").arg(path, error));
+        return false;
+    }
+
+    const SaveResult result = m_runtimeData->saveFile(path, m_runtimeData->fileData());
+    if (!result.ok) {
+        QString rollbackError;
+        if (!ResourceFiles::rollbackResourceTree(resourceUpdate, rollbackError)) {
+            rollbackError = QStringLiteral("\n目标资源目录恢复失败：%1").arg(rollbackError);
+        }
+        QMessageBox::critical(this, QStringLiteral("保存失败"),
+                              QStringLiteral("无法保存到 %1：\n%2%3")
+                                  .arg(path, result.message, rollbackError));
+        return false;
+    }
+    ResourceFiles::discardResourceTreeBackup(resourceUpdate);
     return true;
 }
 
@@ -195,15 +218,67 @@ bool MainWindow::maybeCloseOrContinue()
     return false;
 }
 
+bool MainWindow::chooseProjectArchivePath(QString& path)
+{
+    path.clear();
+    const QString currentPath = m_runtimeData->currentFilePath();
+    const QString initialDir = currentPath.isEmpty()
+        ? QString() : QFileInfo(currentPath).absolutePath();
+    const QString directory = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("选择项目文件夹"), initialDir);
+    if (directory.isEmpty())
+        return false;
+
+    const QDir projectDir(directory);
+    const QString projectName = projectDir.dirName();
+    if (projectName.isEmpty() || projectDir.isRoot()) {
+        QMessageBox::warning(this, QStringLiteral("保存项目"),
+                             QStringLiteral("请选择独立的项目文件夹，不能使用磁盘根目录。"));
+        return false;
+    }
+
+    const QString candidate = projectDir.filePath(projectName + QStringLiteral(".json"));
+    const QStringList jsonFiles = projectDir.entryList({ QStringLiteral("*.json") }, QDir::Files);
+    for (const QString& fileName : jsonFiles) {
+        const QString existing = projectDir.filePath(fileName);
+        if (!sameArchivePath(existing, candidate)) {
+            QMessageBox::warning(
+                this, QStringLiteral("保存项目"),
+                QStringLiteral("目标文件夹已包含其他 JSON 文件，请选择独立的项目文件夹。"));
+            return false;
+        }
+    }
+
+    if (!currentPath.isEmpty() && !sameArchivePath(candidate, currentPath)
+        && sameArchivePath(ResourceFiles::resourceRootDir(candidate),
+                           ResourceFiles::resourceRootDir(currentPath))) {
+        QMessageBox::warning(this, QStringLiteral("保存项目"),
+                             QStringLiteral("当前项目已经位于该文件夹，不能共用 Assets 另存新项目。"));
+        return false;
+    }
+
+    const bool targetExists = QFileInfo::exists(candidate)
+        || QFileInfo::exists(ResourceFiles::resourceRootDir(candidate))
+        || QFileInfo::exists(ResourceFiles::legacyResourceRootDir(candidate));
+    if (targetExists && !sameArchivePath(candidate, currentPath)) {
+        const auto choice = QMessageBox::question(
+            this, QStringLiteral("覆盖项目"),
+            QStringLiteral("目标文件夹已包含项目存档或资源目录，是否覆盖？\n%1").arg(candidate),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (choice != QMessageBox::Yes)
+            return false;
+    }
+
+    path = candidate;
+    return true;
+}
+
 bool MainWindow::saveWithDialog()
 {
     if (!m_runtimeData->currentFilePath().isEmpty())
         return saveToPath(m_runtimeData->currentFilePath());
-    // 无路径转另存为流程；重名覆盖确认由原生对话框完成（需求第 16 条）
-    const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("保存文件"),
-                                                      QString(),
-                                                      QString::fromLatin1(kArchiveFilter));
-    if (path.isEmpty())
+    QString path;
+    if (!chooseProjectArchivePath(path))
         return false;
     return saveToPath(path);
 }
@@ -274,6 +349,9 @@ void MainWindow::updateWindowTitle()
 
 void MainWindow::setupDockPanels()
 {
+    setDockNestingEnabled(true);
+    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+
     auto* hierarchyDock = new QDockWidget(QStringLiteral("Hierarchy"), this);
     hierarchyDock->setObjectName(QStringLiteral("hierarchyDock")); // 保留 objectName 供"窗口"菜单开关
     m_hierarchyPanel = new HierarchyPanel(m_editorCore, hierarchyDock);
@@ -288,16 +366,49 @@ void MainWindow::setupDockPanels()
     addDockWidget(Qt::RightDockWidgetArea, inspectorDock);
     m_docks.append(inspectorDock);
 
+    auto* resourceDock = new QDockWidget(QStringLiteral("资源库"), this);
+    resourceDock->setObjectName(QStringLiteral("resourceDock"));
+    m_resourceWindow = new ResourceWindow(m_editorCore, [this] {
+        if (!m_runtimeData->currentFilePath().isEmpty())
+            return true;
+        return saveWithDialog();
+    }, resourceDock);
+    resourceDock->setWidget(m_resourceWindow);
+    addDockWidget(Qt::BottomDockWidgetArea, resourceDock);
+    m_docks.append(resourceDock);
+
     auto* timelineDock = new QDockWidget(QStringLiteral("时间轴"), this);
     timelineDock->setObjectName(QStringLiteral("timelineDock"));
     m_timelineWidget = new TimelineWidget(m_editorCore, timelineDock);
     timelineDock->setWidget(m_timelineWidget);
-    addDockWidget(Qt::BottomDockWidgetArea, timelineDock);
+    splitDockWidget(resourceDock, timelineDock, Qt::Horizontal);
     m_docks.append(timelineDock);
+    applyDefaultResourceLayout();
+}
 
-    // 时间轴 Dock 初始高度：约容纳 工具行+标尺+标签行+2 分组标题+5 轨道。
-    // 只设初始值（不设最小高度），用户可拖动压扁
-    resizeDocks({ timelineDock }, { 260 }, Qt::Vertical);
+void MainWindow::applyDefaultResourceLayout()
+{
+    QDockWidget* hierarchyDock = nullptr;
+    QDockWidget* resourceDock = nullptr;
+    QDockWidget* timelineDock = nullptr;
+    for (QDockWidget* dock : m_docks) {
+        if (dock->objectName() == QStringLiteral("hierarchyDock"))
+            hierarchyDock = dock;
+        else if (dock->objectName() == QStringLiteral("resourceDock"))
+            resourceDock = dock;
+        else if (dock->objectName() == QStringLiteral("timelineDock"))
+            timelineDock = dock;
+    }
+    if (!hierarchyDock || !resourceDock || !timelineDock)
+        return;
+
+    setDockNestingEnabled(true);
+    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
+    resourceDock->show();
+    splitDockWidget(resourceDock, timelineDock, Qt::Horizontal);
+    const int leftWidth = qMax(220, hierarchyDock->sizeHint().width());
+    resizeDocks({ hierarchyDock, resourceDock }, { leftWidth, leftWidth }, Qt::Horizontal);
+    resizeDocks({ resourceDock, timelineDock }, { 260, 260 }, Qt::Vertical);
 }
 
 void MainWindow::setupMenus()
@@ -328,11 +439,8 @@ void MainWindow::setupMenus()
     QAction* saveAsAction = fileMenu->addAction(QStringLiteral("另存为(&A)..."));
     saveAsAction->setShortcut(QKeySequence::SaveAs);
     connect(saveAsAction, &QAction::triggered, this, [this] {
-        // 重名覆盖确认（需求第 16 条：若否则不保存）由原生对话框完成，列手测
-        const QString path = QFileDialog::getSaveFileName(this, QStringLiteral("另存为"),
-                                                          QString(),
-                                                          QString::fromLatin1(kArchiveFilter));
-        if (!path.isEmpty())
+        QString path;
+        if (chooseProjectArchivePath(path))
             saveToPath(path);
     });
     // 关闭项目：过未保存门卫后回启动页（与启动时同一页，可另选项目或新建）
@@ -391,9 +499,6 @@ void MainWindow::setupMenus()
     connect(settingsAction, &QAction::triggered, this, &MainWindow::openSettings);
 
     QMenu* windowMenu = menuBar()->addMenu(QStringLiteral("窗口(&W)"));
-    QAction* resourceAction = windowMenu->addAction(QStringLiteral("资源库…"));
-    connect(resourceAction, &QAction::triggered, this, &MainWindow::openResourceWindow);
-    windowMenu->addSeparator();
     for (QDockWidget* dock : m_docks)
         windowMenu->addAction(dock->toggleViewAction());
 }
@@ -433,20 +538,4 @@ SettingsWindow* MainWindow::ensureSettingsWindow()
 void MainWindow::openSettings()
 {
     ensureSettingsWindow()->openCategory(SettingsWindow::Category::Stage);
-}
-
-// ---- 项目资源库窗口（阶段14）----
-
-ResourceWindow* MainWindow::ensureResourceWindow()
-{
-    if (!m_resourceWindow) {
-        m_resourceWindow = new ResourceWindow(
-            m_editorCore, [this] { return saveWithDialog(); }, this);
-    }
-    return m_resourceWindow;
-}
-
-void MainWindow::openResourceWindow()
-{
-    ensureResourceWindow()->openWindow();
 }

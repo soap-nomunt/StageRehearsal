@@ -5,7 +5,7 @@
 //
 // 异步信号防护：每次加载都新建 QMediaPlayer，回调捕获 player 指针并核对仍是
 // 当前播放器，快速切换资源时旧播放器的异步信号不会污染新页面。仅别名变化
-// （同 id 同相对路径）不重新加载，试听不中断；路径变化/资源失效则停止并报错。
+// （同 id 同绝对路径）不重新加载，试听不中断；路径变化/资源失效则停止并报错。
 
 #include "data/DataTypes.h"
 
@@ -32,13 +32,14 @@ public:
 
     QString resourceId() const { return m_resourceId; }
     QString relativePath() const { return m_relativePath; }
+    QString absolutePath() const { return m_absolutePath; }
     State state() const { return m_state; }
     QString errorString() const { return m_error; }
     qint64 position() const { return m_position; }
     qint64 duration() const { return m_duration; }
     bool isPlaying() const { return m_playing; }
 
-    void setResource(const ResourceData& resource); // 同 id 同路径不重载
+    void setResource(const ResourceData& resource); // 同 id 同绝对路径不重载
     void clear();
     void play();
     void pause();
@@ -61,6 +62,7 @@ private:
 
     QString m_resourceId;
     QString m_relativePath;
+    QString m_absolutePath;
     State m_state = State::NoResource;
     QString m_error;
     qint64 m_position = 0;

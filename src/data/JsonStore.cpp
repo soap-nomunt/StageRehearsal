@@ -5,6 +5,7 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QSaveFile>
 #include <QSet>
 
 #include <cmath>
@@ -384,7 +385,8 @@ bool parseResourceData(const QJsonValue& value, ResourceData& out, QString& erro
         error = QStringLiteral("资源缺少 id/type/name/originalName/relativePath 字段");
         return false;
     }
-    if (out.id.isEmpty() || out.name.isEmpty() || out.originalName.isEmpty()) {
+    out.name = out.name.trimmed();
+    if (out.id.isEmpty() || out.name.isEmpty() || out.originalName.trimmed().isEmpty()) {
         error = QStringLiteral("资源 id/name/originalName 不能为空");
         return false;
     }
@@ -630,13 +632,15 @@ LoadResult JsonStore::load(const QString& path)
 
 SaveResult JsonStore::save(const QString& path, const FileData& data)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly))
         return { false, QStringLiteral("无法写入文件：%1").arg(file.errorString()) };
 
     const QJsonDocument doc(toJson(data));
     if (file.write(doc.toJson(QJsonDocument::Indented)) < 0)
         return { false, QStringLiteral("写入文件失败：%1").arg(file.errorString()) };
+    if (!file.commit())
+        return { false, QStringLiteral("提交文件失败：%1").arg(file.errorString()) };
 
     return {};
 }

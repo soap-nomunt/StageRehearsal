@@ -3170,7 +3170,7 @@ void testResources(QTemporaryDir& dir)
         QJsonObject root = resourcesRoot();
         QJsonArray resources = root.value(QStringLiteral("resources")).toArray();
         QJsonObject second = resources.at(1).toObject();
-        second[QStringLiteral("name")] = audio.name;
+        second[QStringLiteral("name")] = QStringLiteral("  %1  ").arg(audio.name);
         resources[1] = second;
         root[QStringLiteral("resources")] = resources;
         const QString path = dir.filePath(QStringLiteral("stage14-duplicate-name.json"));
@@ -3202,6 +3202,12 @@ void testResources(QTemporaryDir& dir)
     const QString projectDir = dir.filePath(QStringLiteral("stage14-project"));
     CHECK(QDir().mkpath(projectDir), "阶段14：创建资源测试项目目录");
     const QString archivePath = QDir(projectDir).filePath(QStringLiteral("stage.json"));
+    CHECK(ResourceFiles::resourceRootDir(archivePath)
+              == QDir(projectDir).filePath(QStringLiteral("Assets")),
+          "阶段14：项目资源根目录为 Assets");
+    CHECK(ResourceFiles::legacyResourceRootDir(archivePath)
+              == QDir(projectDir).filePath(QStringLiteral("stage.resources")),
+          "阶段14：保留旧资源目录兼容入口");
     const QString sourcePath = QDir(projectDir).filePath(QStringLiteral("source.mp3"));
     writeTextFile(sourcePath, QByteArrayLiteral("fake-audio"));
 
@@ -3228,6 +3234,23 @@ void testResources(QTemporaryDir& dir)
               && secondRelative == QStringLiteral("audio/res-test-001-2.mp3"),
           "阶段14：同 ID 导入不覆盖既有文件（追加序号）");
 
+    const QString legacyAudio = QDir(ResourceFiles::legacyResourceRootDir(archivePath))
+                                    .filePath(QStringLiteral("audio/legacy.mp3"));
+    CHECK(QDir().mkpath(QFileInfo(legacyAudio).absolutePath()), "阶段14：创建旧资源目录");
+    writeTextFile(legacyAudio, QByteArrayLiteral("legacy-audio"));
+    CHECK(ResourceFiles::resolveResourcePath(archivePath, QStringLiteral("audio/legacy.mp3"))
+              == legacyAudio,
+          "阶段14：迁移前从旧目录解析资源");
+    CHECK(ResourceFiles::migrateLegacyResourceTree(archivePath, error),
+          "阶段14：旧资源目录迁移成功");
+    const QString migratedAudio = QDir(ResourceFiles::resourceRootDir(archivePath))
+                                      .filePath(QStringLiteral("audio/legacy.mp3"));
+    CHECK(QFileInfo::exists(migratedAudio) && QFileInfo::exists(legacyAudio),
+          "阶段14：迁移复制到 Assets 且保留旧目录");
+    CHECK(ResourceFiles::resolveResourcePath(archivePath, QStringLiteral("audio/legacy.mp3"))
+              == migratedAudio,
+          "阶段14：迁移后优先从 Assets 解析资源");
+
     // 未被清单引用的文件也必须随另存为整体复制
     const QString orphanPath = QDir(ResourceFiles::resourceRootDir(archivePath))
                                    .filePath(QStringLiteral("audio/orphan.bin"));
@@ -3236,15 +3259,39 @@ void testResources(QTemporaryDir& dir)
     const QString targetProjectDir = dir.filePath(QStringLiteral("stage14-copy"));
     CHECK(QDir().mkpath(targetProjectDir), "阶段14：创建另存为目标目录");
     const QString targetArchive = QDir(targetProjectDir).filePath(QStringLiteral("stage.json"));
+    const QString targetRoot = ResourceFiles::resourceRootDir(targetArchive);
+    const QString targetKeep = QDir(targetRoot).filePath(QStringLiteral("audio/target-only.txt"));
+    CHECK(QDir().mkpath(QFileInfo(targetKeep).absolutePath()), "阶段14：创建目标资源目录");
+    writeTextFile(targetKeep, QByteArrayLiteral("target-only"));
+    ResourceFiles::ResourceTreeUpdate resourceUpdate;
+    CHECK(ResourceFiles::copyResourceTree(archivePath, targetArchive, resourceUpdate, error)
+              && resourceUpdate.changed,
+          "阶段14：另存为预备目标资源更新");
+    CHECK(!QFileInfo::exists(targetKeep), "阶段14：预备更新替换目标资源目录");
+    CHECK(ResourceFiles::rollbackResourceTree(resourceUpdate, error),
+          "阶段14：保存失败时资源更新可回滚");
+    CHECK(QFileInfo::exists(targetKeep)
+              && !QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/res-test-001.mp3"))),
+          "阶段14：回滚恢复目标原有资源");
     CHECK(ResourceFiles::copyResourceTree(archivePath, targetArchive, error),
           "阶段14：另存为复制整个资源目录");
-    const QString targetRoot = ResourceFiles::resourceRootDir(targetArchive);
     CHECK(QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/res-test-001.mp3"))),
           "阶段14：复制后资源文件在新位置可用");
     CHECK(QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/res-test-001-2.mp3"))),
           "阶段14：复制包含同 ID 的第二个副本");
     CHECK(QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/orphan.bin"))),
           "阶段14：复制包含暂未被清单引用的文件");
+    CHECK(QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/legacy.mp3"))),
+          "阶段14：另存为合并旧目录中的资源");
+    ResourceFiles::ResourceTreeUpdate emptyUpdate;
+    CHECK(ResourceFiles::copyResourceTree(QString(), targetArchive, emptyUpdate, error)
+              && emptyUpdate.changed,
+          "阶段14：空资源项目也生成目标资源树更新");
+    CHECK(QDir(targetRoot).entryList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot).isEmpty(),
+          "阶段14：空资源项目覆盖后目标 Assets 为空");
+    CHECK(ResourceFiles::rollbackResourceTree(emptyUpdate, error)
+              && QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/res-test-001.mp3"))),
+          "阶段14：空资源树更新同样支持失败回滚");
 
     // ---- EditorCore：添加/移除/重命名命令与选中仲裁 ----
     RuntimeData runtime;
@@ -3321,6 +3368,13 @@ void testResources(QTemporaryDir& dir)
     runtime.newFile();
     CHECK(runtime.fileData().resources.isEmpty(), "阶段14：新建文件资源库为空");
     CHECK(core.activeResourceId().isEmpty(), "阶段14：新建文件清空资源选中态");
+    ResourceData trimmed = audio;
+    trimmed.id = QStringLiteral("res-trimmed");
+    trimmed.name = QStringLiteral("  配乐  ");
+    trimmed.relativePath = QStringLiteral("audio/trimmed.mp3");
+    CHECK(core.addResources({ trimmed }), "阶段14：业务添加入口接受可规范化别名");
+    CHECK(core.findResource(trimmed.id)->name == QStringLiteral("配乐"),
+          "阶段14：业务添加入口统一 trim 别名");
 }
 
 int main(int argc, char* argv[])

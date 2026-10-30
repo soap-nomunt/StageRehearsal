@@ -58,20 +58,23 @@ void ResourcePreviewPlayer::setPlaying(bool playing)
 
 void ResourcePreviewPlayer::setResource(const ResourceData& resource)
 {
-    if (m_resourceId == resource.id && m_relativePath == resource.relativePath)
-        return; // 别名等非路径变化：保持当前试听
+    const QString absolutePath =
+        ResourceFiles::resolveResourcePath(m_runtimeData->currentFilePath(), resource.relativePath);
+    if (m_resourceId == resource.id && m_relativePath == resource.relativePath
+        && m_absolutePath == absolutePath) {
+        return;
+    }
 
     teardownPlayer();
     m_resourceId = resource.id;
     m_relativePath = resource.relativePath;
+    m_absolutePath = absolutePath;
     m_position = 0;
     m_duration = 0;
     setState(State::Loading);
     emit positionChanged(m_position);
     emit durationChanged(m_duration);
 
-    const QString absolutePath =
-        ResourceFiles::resolveResourcePath(m_runtimeData->currentFilePath(), resource.relativePath);
     if (absolutePath.isEmpty() || !QFileInfo::exists(absolutePath)) {
         setState(State::Missing, QStringLiteral("资源文件缺失：%1").arg(resource.relativePath));
         return;
@@ -144,6 +147,7 @@ void ResourcePreviewPlayer::clear()
     teardownPlayer();
     m_resourceId.clear();
     m_relativePath.clear();
+    m_absolutePath.clear();
     m_position = 0;
     m_duration = 0;
     if (hadResource || m_state != State::NoResource) {

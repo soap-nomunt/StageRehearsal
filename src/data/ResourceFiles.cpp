@@ -3,6 +3,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QUuid>
 
 namespace {
 
@@ -18,18 +19,54 @@ QString absoluteCleanPath(const QString& path)
     return QDir::cleanPath(QFileInfo(path).absoluteFilePath());
 }
 
-bool samePath(const QString& a, const QString& b)
+Qt::CaseSensitivity pathSensitivity()
 {
-    const QString left = absoluteCleanPath(a);
-    const QString right = absoluteCleanPath(b);
 #if defined(Q_OS_WIN)
-    return left.compare(right, Qt::CaseInsensitive) == 0;
+    return Qt::CaseInsensitive;
 #else
-    return left == right;
+    return Qt::CaseSensitive;
 #endif
 }
 
-bool copyDirectoryContents(const QString& sourceDir, const QString& targetDir, QString& error)
+bool samePath(const QString& a, const QString& b)
+{
+    return absoluteCleanPath(a).compare(absoluteCleanPath(b), pathSensitivity()) == 0;
+}
+
+bool pathInside(const QString& path, const QString& root)
+{
+    const QString absolutePath = absoluteCleanPath(path);
+    const QString absoluteRoot = absoluteCleanPath(root);
+    return absolutePath != absoluteRoot
+        && absolutePath.startsWith(absoluteRoot + QLatin1Char('/'), pathSensitivity());
+}
+
+bool pathsOverlap(const QString& a, const QString& b)
+{
+    return samePath(a, b) || pathInside(a, b) || pathInside(b, a);
+}
+
+QString uniqueSiblingPath(const QString& targetPath, const QString& tag)
+{
+    const QFileInfo info(targetPath);
+    return QDir(info.absolutePath())
+        .filePath(QStringLiteral(".%1.%2.%3")
+                      .arg(info.fileName(), tag,
+                           QUuid::createUuid().toString(QUuid::WithoutBraces)));
+}
+
+bool removeDirectory(const QString& path, QString& error)
+{
+    if (!QFileInfo::exists(path))
+        return true;
+    if (QDir(path).removeRecursively())
+        return true;
+    error = QStringLiteral("无法清理目录：%1").arg(path);
+    return false;
+}
+
+bool copyDirectoryContents(const QString& sourceDir, const QString& targetDir,
+                           bool overwrite, QString& error)
 {
     QDir source(sourceDir);
     if (!source.exists()) {
@@ -41,18 +78,26 @@ bool copyDirectoryContents(const QString& sourceDir, const QString& targetDir, Q
         return false;
     }
 
-    const QFileInfoList entries =
-        source.entryInfoList(QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
+    const QFileInfoList entries = source.entryInfoList(
+        QDir::Dirs | QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden | QDir::System);
     for (const QFileInfo& entry : entries) {
+        if (entry.isSymLink()) {
+            error = QStringLiteral("资源目录不支持链接条目：%1").arg(entry.absoluteFilePath());
+            return false;
+        }
         const QString targetPath = QDir(targetDir).filePath(entry.fileName());
         if (entry.isDir()) {
-            if (!copyDirectoryContents(entry.absoluteFilePath(), targetPath, error))
+            if (!copyDirectoryContents(entry.absoluteFilePath(), targetPath, overwrite, error))
                 return false;
             continue;
         }
-        if (QFileInfo::exists(targetPath) && !QFile::remove(targetPath)) {
-            error = QStringLiteral("无法覆盖目标资源文件：%1").arg(targetPath);
-            return false;
+        if (QFileInfo::exists(targetPath)) {
+            if (!overwrite)
+                continue;
+            if (!QFile::remove(targetPath)) {
+                error = QStringLiteral("无法覆盖目标资源文件：%1").arg(targetPath);
+                return false;
+            }
         }
         if (!QFile::copy(entry.absoluteFilePath(), targetPath)) {
             error = QStringLiteral("无法复制资源文件：%1 → %2")
@@ -63,9 +108,41 @@ bool copyDirectoryContents(const QString& sourceDir, const QString& targetDir, Q
     return true;
 }
 
+QString candidatePath(const QString& root, const QString& relativePath)
+{
+    const QString absoluteRoot = absoluteCleanPath(root);
+    const QString candidate = absoluteCleanPath(QDir(absoluteRoot).filePath(relativePath));
+    if (candidate != absoluteRoot
+        && !candidate.startsWith(absoluteRoot + QLatin1Char('/'), pathSensitivity())) {
+        return QString();
+    }
+
+    const QFileInfo candidateInfo(candidate);
+    if (!candidateInfo.exists())
+        return candidate;
+    const QString canonicalRoot = QFileInfo(absoluteRoot).canonicalFilePath();
+    const QString canonicalCandidate = candidateInfo.canonicalFilePath();
+    if (canonicalRoot.isEmpty() || canonicalCandidate.isEmpty())
+        return QString();
+    const QString cleanRoot = QDir::cleanPath(canonicalRoot);
+    const QString cleanCandidate = QDir::cleanPath(canonicalCandidate);
+    if (cleanCandidate != cleanRoot
+        && !cleanCandidate.startsWith(cleanRoot + QLatin1Char('/'), pathSensitivity())) {
+        return QString();
+    }
+    return candidate;
+}
+
 } // namespace
 
 QString ResourceFiles::resourceRootDir(const QString& archivePath)
+{
+    if (archivePath.isEmpty())
+        return QString();
+    return QDir(QFileInfo(archivePath).absolutePath()).filePath(QStringLiteral("Assets"));
+}
+
+QString ResourceFiles::legacyResourceRootDir(const QString& archivePath)
 {
     if (archivePath.isEmpty())
         return QString();
@@ -87,8 +164,9 @@ bool ResourceFiles::isSafeRelativePath(const QString& relativePath)
         return false;
     const QString path = normalizedRelative(relativePath);
     if (path.isEmpty() || path.startsWith(QLatin1Char('/'))
-        || path.contains(QLatin1Char(':')) || QDir::isAbsolutePath(path))
+        || path.contains(QLatin1Char(':')) || QDir::isAbsolutePath(path)) {
         return false;
+    }
 
     const QString cleaned = QDir::cleanPath(path);
     if (cleaned != path || cleaned.isEmpty() || cleaned == QLatin1String("."))
@@ -105,17 +183,30 @@ QString ResourceFiles::resolveResourcePath(const QString& archivePath, const QSt
 {
     if (archivePath.isEmpty() || !isSafeRelativePath(relativePath))
         return QString();
-    const QString root = absoluteCleanPath(resourceRootDir(archivePath));
-    const QString resolved = absoluteCleanPath(QDir(root).filePath(normalizedRelative(relativePath)));
-#if defined(Q_OS_WIN)
-    const Qt::CaseSensitivity sensitivity = Qt::CaseInsensitive;
-#else
-    const Qt::CaseSensitivity sensitivity = Qt::CaseSensitive;
-#endif
-    if (resolved != root
-        && !resolved.startsWith(root + QLatin1Char('/'), sensitivity))
-        return QString();
-    return resolved;
+
+    const QString normalized = normalizedRelative(relativePath);
+    const QString primary = candidatePath(resourceRootDir(archivePath), normalized);
+    if (!primary.isEmpty() && QFileInfo::exists(primary))
+        return primary;
+    const QString legacy = candidatePath(legacyResourceRootDir(archivePath), normalized);
+    if (!legacy.isEmpty() && QFileInfo::exists(legacy))
+        return legacy;
+    return primary;
+}
+
+bool ResourceFiles::migrateLegacyResourceTree(const QString& archivePath, QString& error)
+{
+    error.clear();
+    if (archivePath.isEmpty())
+        return true;
+    const QString legacyRoot = legacyResourceRootDir(archivePath);
+    if (!QFileInfo::exists(legacyRoot))
+        return true;
+    if (!QFileInfo(legacyRoot).isDir()) {
+        error = QStringLiteral("旧资源路径不是目录：%1").arg(legacyRoot);
+        return false;
+    }
+    return copyDirectoryContents(legacyRoot, resourceRootDir(archivePath), false, error);
 }
 
 bool ResourceFiles::importResourceFile(const QString& archivePath, ResourceType type,
@@ -139,6 +230,8 @@ bool ResourceFiles::importResourceFile(const QString& archivePath, ResourceType 
         error = QStringLiteral("文件不存在或不可读取");
         return false;
     }
+    if (!migrateLegacyResourceTree(archivePath, error))
+        return false;
 
     const QString root = resourceRootDir(archivePath);
     const QString subdir = typeSubdir(type);
@@ -166,34 +259,127 @@ bool ResourceFiles::importResourceFile(const QString& archivePath, ResourceType 
 }
 
 bool ResourceFiles::copyResourceTree(const QString& sourceArchivePath,
-                                     const QString& targetArchivePath, QString& error)
+                                     const QString& targetArchivePath,
+                                     ResourceTreeUpdate& update, QString& error)
 {
+    update = {};
     error.clear();
     if (targetArchivePath.isEmpty()) {
         error = QStringLiteral("目标存档路径为空");
         return false;
     }
-    const QString sourceRoot = resourceRootDir(sourceArchivePath);
-    const QString targetRoot = resourceRootDir(targetArchivePath);
-    if (sourceRoot.isEmpty() || sourceRoot == targetRoot || samePath(sourceRoot, targetRoot))
-        return true; // 新项目无资源目录 / 保存到同一位置：无需复制
 
-    const QFileInfo sourceInfo(sourceRoot);
-    if (!sourceInfo.exists())
-        return true; // 尚无资源目录
-    if (!sourceInfo.isDir()) {
-        error = QStringLiteral("资源路径不是目录：%1").arg(sourceRoot);
+    const QString targetRoot = resourceRootDir(targetArchivePath);
+    QStringList sourceRoots;
+    if (!sourceArchivePath.isEmpty()) {
+        sourceRoots = { resourceRootDir(sourceArchivePath),
+                        legacyResourceRootDir(sourceArchivePath) };
+    }
+    for (const QString& sourceRoot : sourceRoots) {
+        if (samePath(sourceRoot, targetRoot))
+            return true;
+        if (QFileInfo::exists(sourceRoot) && pathsOverlap(sourceRoot, targetRoot)) {
+            error = QStringLiteral("源资源目录与目标资源目录不能互相嵌套");
+            return false;
+        }
+    }
+
+    QString stagingRoot;
+    for (const QString& sourceRoot : sourceRoots) {
+        if (!QFileInfo::exists(sourceRoot))
+            continue;
+        if (!QFileInfo(sourceRoot).isDir()) {
+            error = QStringLiteral("资源路径不是目录：%1").arg(sourceRoot);
+            return false;
+        }
+        if (stagingRoot.isEmpty()) {
+            const QFileInfo targetInfo(targetRoot);
+            if (!QDir().mkpath(targetInfo.absolutePath())) {
+                error = QStringLiteral("无法创建目标项目目录：%1").arg(targetInfo.absolutePath());
+                return false;
+            }
+            stagingRoot = uniqueSiblingPath(targetRoot, QStringLiteral("staging"));
+        }
+        if (!copyDirectoryContents(sourceRoot, stagingRoot, false, error)) {
+            QString cleanupError;
+            removeDirectory(stagingRoot, cleanupError);
+            return false;
+        }
+    }
+    if (stagingRoot.isEmpty()) {
+        const QFileInfo targetInfo(targetRoot);
+        if (!QDir().mkpath(targetInfo.absolutePath())) {
+            error = QStringLiteral("无法创建目标项目目录：%1").arg(targetInfo.absolutePath());
+            return false;
+        }
+        stagingRoot = uniqueSiblingPath(targetRoot, QStringLiteral("staging"));
+        if (!QDir().mkpath(stagingRoot)) {
+            error = QStringLiteral("无法创建临时资源目录：%1").arg(stagingRoot);
+            return false;
+        }
+    }
+
+    QString backupRoot;
+    if (QFileInfo::exists(targetRoot)) {
+        if (!QFileInfo(targetRoot).isDir()) {
+            error = QStringLiteral("目标资源路径不是目录：%1").arg(targetRoot);
+            QString cleanupError;
+            removeDirectory(stagingRoot, cleanupError);
+            return false;
+        }
+        backupRoot = uniqueSiblingPath(targetRoot, QStringLiteral("backup"));
+        if (!QDir().rename(targetRoot, backupRoot)) {
+            error = QStringLiteral("无法备份目标资源目录：%1").arg(targetRoot);
+            QString cleanupError;
+            removeDirectory(stagingRoot, cleanupError);
+            return false;
+        }
+    }
+
+    if (!QDir().rename(stagingRoot, targetRoot)) {
+        error = QStringLiteral("无法安装目标资源目录：%1").arg(targetRoot);
+        if (!backupRoot.isEmpty() && !QDir().rename(backupRoot, targetRoot)) {
+            error += QStringLiteral("\n目标资源目录恢复失败，原资源保留在：%1").arg(backupRoot);
+        }
+        QString cleanupError;
+        removeDirectory(stagingRoot, cleanupError);
         return false;
     }
-#if defined(Q_OS_WIN)
-    const Qt::CaseSensitivity sensitivity = Qt::CaseInsensitive;
-#else
-    const Qt::CaseSensitivity sensitivity = Qt::CaseSensitive;
-#endif
-    if (absoluteCleanPath(targetRoot).startsWith(absoluteCleanPath(sourceRoot) + QLatin1Char('/'),
-                                                 sensitivity)) {
-        error = QStringLiteral("目标资源目录不能位于当前资源目录内");
-        return false; // 防止递归复制自身
+
+    update.targetRoot = targetRoot;
+    update.backupRoot = backupRoot;
+    update.changed = true;
+    return true;
+}
+
+bool ResourceFiles::copyResourceTree(const QString& sourceArchivePath,
+                                     const QString& targetArchivePath, QString& error)
+{
+    ResourceTreeUpdate update;
+    if (!copyResourceTree(sourceArchivePath, targetArchivePath, update, error))
+        return false;
+    discardResourceTreeBackup(update);
+    return true;
+}
+
+bool ResourceFiles::rollbackResourceTree(ResourceTreeUpdate& update, QString& error)
+{
+    error.clear();
+    if (!update.changed)
+        return true;
+    if (!removeDirectory(update.targetRoot, error))
+        return false;
+    if (!update.backupRoot.isEmpty() && !QDir().rename(update.backupRoot, update.targetRoot)) {
+        error = QStringLiteral("无法恢复目标资源目录：%1").arg(update.targetRoot);
+        return false;
     }
-    return copyDirectoryContents(sourceRoot, targetRoot, error);
+    update = {};
+    return true;
+}
+
+void ResourceFiles::discardResourceTreeBackup(ResourceTreeUpdate& update)
+{
+    if (!update.backupRoot.isEmpty())
+        QDir(update.backupRoot).removeRecursively();
+    update = {};
 }

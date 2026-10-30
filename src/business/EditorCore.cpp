@@ -46,11 +46,8 @@ EditorCore::EditorCore(RuntimeData* runtimeData, QObject* parent)
         const ResourceData* resource = findResource(m_activeResourceId);
         if (!resource)
             return; // pruneActiveResource 负责清空
-        if (!m_previewPlayer.resourceId().isEmpty()
-            && m_previewPlayer.resourceId() == resource->id
-            && m_previewPlayer.relativePath() != resource->relativePath) {
+        if (m_previewPlayer.resourceId() == resource->id)
             m_previewPlayer.setResource(*resource);
-        }
     });
     // 阶段12：对象选中变化清除选中路径（选中对象 → Inspector 回对象页；
     // 清空选择不动路径——路径点方向键微调依赖无对象选中 + activePath 共存）
@@ -722,14 +719,16 @@ bool EditorCore::addResources(const QList<ResourceData>& resources)
     if (resources.isEmpty())
         return false;
 
+    QList<ResourceData> cleaned = resources;
     QSet<QString> ids;
     QSet<QString> names;
     for (const ResourceData& resource : m_runtimeData->fileData().resources) {
         ids.insert(resource.id);
         names.insert(resource.name);
     }
-    for (const ResourceData& resource : resources) {
-        if (resource.id.isEmpty() || resource.name.trimmed().isEmpty()
+    for (ResourceData& resource : cleaned) {
+        resource.name = resource.name.trimmed();
+        if (resource.id.isEmpty() || resource.name.isEmpty()
             || resource.originalName.trimmed().isEmpty())
             return false;
         if (resource.originalName.contains(QLatin1Char('/'))
@@ -742,7 +741,7 @@ bool EditorCore::addResources(const QList<ResourceData>& resources)
         ids.insert(resource.id);
         names.insert(resource.name);
     }
-    return executeCommand(std::make_unique<AddResourcesCommand>(resources));
+    return executeCommand(std::make_unique<AddResourcesCommand>(cleaned));
 }
 
 bool EditorCore::removeResource(const QString& id)

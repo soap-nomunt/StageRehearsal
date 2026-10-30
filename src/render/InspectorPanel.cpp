@@ -891,10 +891,9 @@ void InspectorPanel::refreshResourcePage()
         // 图片资源不保留音频试听
         if (!m_editorCore->previewPlayer()->resourceId().isEmpty())
             m_editorCore->previewPlayer()->clear();
-        if (m_resourceShownId != resource->id
-            || m_resourceShownPath != resource->relativePath) {
+        if (m_resourceShownId != resource->id || m_resourceShownPath != absolutePath) {
             m_resourceShownId = resource->id;
-            m_resourceShownPath = resource->relativePath;
+            m_resourceShownPath = absolutePath;
             m_resourceImageValid = false;
             m_resourceImagePreview->clearImage();
             m_resourceImageInfo->clear();
@@ -922,9 +921,7 @@ void InspectorPanel::refreshResourcePage()
 
     m_resourceMediaStack->setCurrentWidget(m_resourceAudioPage);
     ResourcePreviewPlayer* player = m_editorCore->previewPlayer();
-    if (player->resourceId() != resource->id
-        || player->relativePath() != resource->relativePath)
-        player->setResource(*resource); // 同 id 同路径不重载（别名修改不中断试听）
+    player->setResource(*resource);
     updateAudioControls();
 }
 
@@ -1006,8 +1003,7 @@ void InspectorPanel::playActiveResource()
     if (!resource || resource->type != ResourceType::Audio)
         return;
     ResourcePreviewPlayer* player = m_editorCore->previewPlayer();
-    if (player->resourceId() != resource->id)
-        player->setResource(*resource);
+    player->setResource(*resource);
     player->play(); // 试听开始 → EditorCore 暂停时间轴（播放互斥）
     updateAudioControls();
 }

@@ -47,20 +47,18 @@ protected:
 
 private:
     void setupDockPanels();
+    void applyDefaultResourceLayout();
     void setupMenus();
     void updateEditActions(); // 撤销/重做随栈状态；复制/粘贴/删除随选中与剪贴板
     void updateWindowTitle(); // 标题栏：文件名[*] - 应用名（[*] 随 dirty 显示）
-    bool saveWithDialog();    // 保存流程：有路径直存；无路径弹另存为对话框取路径
+    bool saveWithDialog();    // 保存流程：有路径直存；无路径选择项目文件夹
+    bool chooseProjectArchivePath(QString& path);
     void closeProject();      // 文件菜单"关闭项目"：过门卫 → 隐藏主窗口回启动页
     void saveWindowLayout();  // 布局落盘（closeEvent 与关闭项目的退出路径共用）
     // 统一设置窗口（阶段7）：菜单栏顶层"设置"项直达（舞台/偏好两个旧入口已并入），
     // 打开定位"舞台"分类
     SettingsWindow* ensureSettingsWindow(); // 懒创建
     void openSettings();
-    // 资源库窗口（阶段14）：非模态单例，关闭只隐藏；导入前保存门卫复用另存为流程
-    ResourceWindow* ensureResourceWindow();
-    void openResourceWindow();
-
     RuntimeData* m_runtimeData = nullptr;
     EditorCore* m_editorCore = nullptr;
     StageScene* m_scene = nullptr;
@@ -69,7 +67,7 @@ private:
     InspectorPanel* m_inspectorPanel = nullptr;
     TimelineWidget* m_timelineWidget = nullptr;
     SettingsWindow* m_settingsWindow = nullptr; // 设置窗口单例（懒创建；关闭只隐藏不销毁）
-    ResourceWindow* m_resourceWindow = nullptr; // 资源库窗口单例（阶段14，懒创建）
+    ResourceWindow* m_resourceWindow = nullptr; // 默认位于 Hierarchy 下方、时间轴左侧
     QList<QDockWidget*> m_docks;
 
     QAction* m_undoAction = nullptr;

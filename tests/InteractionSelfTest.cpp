@@ -2739,6 +2739,8 @@ int main(int argc, char* argv[])
         formSegment(actorA16, 2.0, 3.0);
         core16->timelinePlayer()->play();
         CHECK(!core16->activeSegment().has_value(), "阶段12：播放开始清除双帧态");
+        runtime16->commitFileData(runtime16->fileData());
+        CHECK(!core16->activeSegment().has_value(), "阶段12：播放中数据刷新双帧不回潮");
         core16->timelinePlayer()->pause();
 
         // ---- 清除路径：命令提交后防御（段内打帧破坏相邻性） ----
@@ -3942,15 +3944,29 @@ int main(int argc, char* argv[])
 
         QAction* resourceAction = nullptr;
         for (QAction* action : w22.findChildren<QAction*>()) {
-            if (action->text() == QStringLiteral("资源库…")) {
+            if (action->text() == QStringLiteral("资源库")) {
                 resourceAction = action;
                 break;
             }
         }
-        CHECK(resourceAction != nullptr, "阶段14：窗口菜单含资源库入口");
-        resourceAction->trigger();
+        CHECK(resourceAction != nullptr, "阶段14：窗口菜单含资源库显隐入口");
         auto* resourceWindow = w22.findChild<ResourceWindow*>();
-        CHECK(resourceWindow && resourceWindow->isVisible(), "阶段14：资源库窗口打开");
+        auto* resourceDock = w22.findChild<QDockWidget*>(QStringLiteral("resourceDock"));
+        auto* hierarchyDock = w22.findChild<QDockWidget*>(QStringLiteral("hierarchyDock"));
+        auto* timelineDock = w22.findChild<QDockWidget*>(QStringLiteral("timelineDock"));
+        CHECK(resourceWindow && resourceWindow->isVisible() && resourceDock
+                  && resourceDock->isVisible(),
+              "阶段14：资源库默认停靠显示");
+        CHECK(resourceDock && hierarchyDock && timelineDock
+                  && qAbs(resourceDock->width() - hierarchyDock->width()) <= 2
+                  && qAbs(resourceDock->height() - timelineDock->height()) <= 2,
+              "阶段14：资源库与 Hierarchy 等宽、与时间轴等高");
+        CHECK(resourceDock && hierarchyDock && timelineDock
+                  && resourceDock->mapToGlobal(QPoint(0, 0)).x()
+                      < timelineDock->mapToGlobal(QPoint(0, 0)).x()
+                  && resourceDock->mapToGlobal(QPoint(0, 0)).y()
+                      > hierarchyDock->mapToGlobal(QPoint(0, 0)).y(),
+              "阶段14：资源库位于 Hierarchy 下方、时间轴左侧");
         auto* resourceList = resourceWindow
             ? resourceWindow->findChild<QListWidget*>(QStringLiteral("resourceList"))
             : nullptr;
@@ -3968,8 +3984,39 @@ int main(int argc, char* argv[])
         CHECK(resourcePreview && !resourcePreview->pixmap().isNull(),
               "阶段14：Inspector 图片预览已加载");
 
-        resourceWindow->close();
-        CHECK(!resourceWindow->isVisible(), "阶段14：资源库窗口关闭只隐藏");
+        QString segmentObjectId;
+        double segmentFrom = 0.0;
+        double segmentTo = 0.0;
+        for (const ObjectData& object : runtime22->fileData().objects) {
+            if (object.keyframes.size() >= 2) {
+                segmentObjectId = object.id;
+                segmentFrom = object.keyframes.at(0).t;
+                segmentTo = object.keyframes.at(1).t;
+                break;
+            }
+        }
+        auto* timeline22 = w22.findChild<TimelineWidget*>();
+        auto* canvas22 = w22.findChild<QWidget*>(QStringLiteral("timelineCanvas"));
+        CHECK(!segmentObjectId.isEmpty() && timeline22 && canvas22,
+              "阶段14：准备双帧与资源选中回归数据");
+        QTest::mouseClick(canvas22, Qt::LeftButton, Qt::NoModifier,
+                          timeline22->canvasPosFor(segmentObjectId, segmentFrom));
+        QTest::mouseClick(canvas22, Qt::LeftButton, Qt::ControlModifier,
+                          timeline22->canvasPosFor(segmentObjectId, segmentTo));
+        CHECK(core22->activeSegment().has_value(), "阶段14：双帧选择形成");
+        core22->setActiveResource(resourceId);
+        CHECK(!core22->activeSegment().has_value(), "阶段14：资源选中清除双帧段");
+        CHECK(core22->renameResource(resourceId, QStringLiteral("幕布（改）")),
+              "阶段14：资源重命名触发数据刷新");
+        CHECK(core22->activeResourceId() == resourceId && !core22->activeSegment().has_value(),
+              "阶段14：数据刷新后双帧选择不回潮");
+        CHECK(core22->undo() && core22->activeResourceId() == resourceId,
+              "阶段14：撤销重命名仍保持资源选中");
+
+        resourceAction->trigger();
+        CHECK(!resourceWindow->isVisible(), "阶段14：窗口菜单可隐藏资源库 dock");
+        resourceAction->trigger();
+        CHECK(resourceWindow->isVisible(), "阶段14：窗口菜单可重新显示资源库 dock");
 
         const QString targetPath = tempDir.filePath(QStringLiteral("stage14-saved/stage.json"));
         CHECK(w22.saveToPath(targetPath), "阶段14：含资源的项目另存为成功");
