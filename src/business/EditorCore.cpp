@@ -293,7 +293,7 @@ bool EditorCore::reparent(const QList<QString>& ids, const QString& newParentId,
     if (!newParentId.isEmpty()) {
         const ObjectData* newParent = findObject(newParentId);
         if (!newParent || newParent->type == ObjectType::Prop)
-            return false; // 父必须存在；Prop 不出现
+            return false; // 父必须存在；Prop 不可作父对象
     }
 
     QSet<QString> idSet;

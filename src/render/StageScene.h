@@ -12,7 +12,7 @@
 // 阶段12：双帧选中态可视化——EditorCore::activeSegment 非空时绘制前帧幽灵
 // （不透明）+ 后帧幽灵（0.4 透明）+ 两帧间路径折线（恒宽 cosmetic 白线；
 // 段内有 PathData 时按 PathGeometry 采样复合曲线，与插值同一实现）。
-// 幽灵复用 ActorItem/ScreenItem 渲染（含朝向），打幽灵标记不参与选中/命中/
+// 幽灵复用 ActorItem/ScreenItem/PropItem 渲染（演员/屏风含朝向标记），打幽灵标记不参与选中/命中/
 // 显示值驱动，位姿取关键帧数据值（与插值显示值分离）；态消失（nullopt）移除，
 // 全量重建后按段引用重铺。选中路径（activePath）时叠加路径点标记
 // （ItemIgnoresTransformations 缩放恒定尺寸；选中点蓝色高亮）；
@@ -54,7 +54,7 @@ public:
 
     // 视口手势用的命中查询
     StageObjectItem* itemById(const QString& id) const;
-    StageObjectItem* topStageItemAt(const QPointF& scenePos) const; // 最上层演员/屏风，无则空
+    StageObjectItem* topStageItemAt(const QPointF& scenePos) const; // 最上层演员/屏风/道具，无则空
     QList<StageObjectItem*> stageItems() const;
 
     // 双帧段选中态（阶段12）：设置/清除幽灵与路径覆盖物；nullopt = 态消失移除

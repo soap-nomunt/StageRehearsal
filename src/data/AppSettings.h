@@ -27,7 +27,7 @@ public:
     static constexpr double defaultGridSizeCm            = 100.0; // 网格间距默认值
     static constexpr double defaultSnapRangeCm           = 20.0;  // 网格吸附距离默认值
 
-    // 默认调色板（演员/屏风区分色）
+    // 对象默认调色板（创建演员、屏风和道具时按顺序轮转取色）
     static QList<QColor> defaultPalette();
 
     // 舞台颜色默认值（浅灰：比网格线 #d3d3d3 深、比画布底色 #242424 浅）。

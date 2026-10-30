@@ -267,7 +267,7 @@ void StageScene::refreshSegmentOverlay()
         }
     }
 
-    // 幽灵：复用 ActorItem/ScreenItem 渲染（含朝向三角/凸点），位姿取关键帧数据值
+    // 幽灵：复用 ActorItem/ScreenItem/PropItem 渲染（演员/屏风含朝向三角/凸点），位姿取关键帧数据值
     // （与插值显示值分离）；前帧不透明、后帧 0.4 透明；幽灵标记 → 选中/命中/显示值
     // 驱动全部跳过（itemById/topStageItemAt/stageItems 过滤）
     const auto makeGhost = [this, target](const Keyframe& key, qreal opacity) {

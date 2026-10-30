@@ -2,7 +2,7 @@
 
 // 业务层中枢：由 MainWindow 持有并注入各面板/视口。
 // 持有 RuntimeData（不拥有）、SelectionModel、内部剪贴板、UndoStack（阶段4）。
-// 可操作对象（演员/屏风/空对象的创建/删除/变换/属性/关键帧/场次标签）的一切
+// 可操作对象（演员/屏风/道具/空对象的创建/删除/变换/属性/关键帧/场次标签）的一切
 // 数据修改统一走 executeCommand：命令先 apply 到 FileData 副本，再经
 // RuntimeData::commitFileData 提交回数据层（渲染层不允许直接改数据）。
 // 提交成功的命令入撤销栈；撤销/重做复用同一提交路径（revert/apply 后
@@ -88,7 +88,7 @@ public:
 
     const ObjectData* findObject(const QString& id) const;
 
-    // 名字全局唯一（演员与屏风统一校验）；excludeId 用于排除自身
+    // 所有对象名称全局唯一；excludeId 用于排除自身
     bool isNameTaken(const QString& name, const QString& excludeId = QString()) const;
 
     // ---- 创建 / 剪贴板 ----
@@ -102,7 +102,7 @@ public:
     // ---- 层级整理 ----
     // 拖拽落点：newParentId 空串 = 顶层；insertIndex = 移除被移动子树后在
     // newParentId 直系子对象序列中的插入下标。禁止环（拖到自身/后代之下）、
-    // Prop 一律拒绝；返回 false 表示拒绝或无实际变更。
+    // 禁止以 Prop 为父对象；返回 false 表示拒绝或无实际变更。
     bool reparent(const QList<QString>& ids, const QString& newParentId, int insertIndex);
 
     // ---- 变换 / 属性 ----
@@ -121,7 +121,7 @@ public:
                          const KeyframeConfirmCallback& confirm); // 方向键微调，不吸附
 
     // 打帧按钮：以当前显示值（插值结果）在游标处 upsert，不弹窗。
-    // 可用性：单选演员/屏风（多选/空选/空对象禁用，见 canKeyframeSelection）。
+    // 可用性：单选演员/屏风/道具（多选/空选/空对象禁用，见 canKeyframeSelection）。
     bool keyframeSelectionAtCursor();
     bool canKeyframeSelection() const;
 

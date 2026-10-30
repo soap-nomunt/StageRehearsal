@@ -268,7 +268,7 @@ SettingsWindow::SettingsWindow(RuntimeData* runtimeData, EditorCore* editorCore,
     connect(m_gridSnapCheck, &QCheckBox::toggled, this,
             [this](bool checked) { m_runtimeData->settings().setGridSnapEnabled(checked); });
     createRow(canvasLayout, QStringLiteral("画布：网格吸附"),
-              QStringLiteral("拖拽演员/屏风松手时吸附到附近的网格点"
+              QStringLiteral("拖拽演员、屏风或道具时吸附到附近的网格点"
                              "（吸附距离由“吸附距离”设置决定）。"),
               m_gridSnapCheck);
 
@@ -303,7 +303,7 @@ SettingsWindow::SettingsWindow(RuntimeData* runtimeData, EditorCore* editorCore,
     connect(m_snapRangeSpin, &QDoubleSpinBox::valueChanged, this,
             [this](double value) { m_runtimeData->settings().setSnapRangeCm(value); });
     createRow(canvasLayout, QStringLiteral("画布：吸附距离"),
-              QStringLiteral("拖拽演员/屏风松手时，吸附到该距离范围内的最近网格点，"
+              QStringLiteral("拖拽演员、屏风或道具时，吸附到该距离范围内的最近网格点，"
                              "单位 cm，取值 1～200。仅在“网格吸附”开启时生效。"),
               m_snapRangeSpin);
 

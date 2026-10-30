@@ -32,7 +32,7 @@
 // 重绑定、段内打帧丢弃、删帧相邻两段丢弃、删对象级联）及撤销恢复；插值弧长匀速
 // 数值断言（等 t 步进 = 等弧长步进，无路径段与旧行为逐位一致）。
 // 阶段13：存档 v5——ObjectData 道具字段（shape/scaleX/scaleY/standable）往返逐字段 /
-// v4 迁移宽容缺省 / 非法形状回退默认矩形；EditorCore 解禁 createObject(Prop) /
+// v4 迁移宽容缺省 / 非法形状回退默认矩形；EditorCore 支持 createObject(Prop) /
 // reparent 可作子不可作父 / setPropScale/setPropStandable/setPropShape 命令；
 // 合围校验纯函数全分支（validatePropShape：顶点数/零长边/直线与弧边自交/退化）；
 // 阻挡判定（pathBlocked：屏风/不可站立道具扫掠相交，演员不挡，自身排除，不溯及
@@ -186,7 +186,7 @@ void testTypeMapping()
     ObjectType type = ObjectType::Actor;
     CHECK(objectTypeToString(ObjectType::Actor) == QStringLiteral("actor"), "ObjectType::Actor -> \"actor\"");
     CHECK(objectTypeToString(ObjectType::Screen) == QStringLiteral("screen"), "ObjectType::Screen -> \"screen\"");
-    CHECK(objectTypeToString(ObjectType::Prop) == QStringLiteral("prop"), "ObjectType::Prop -> \"prop\"（预留道具）");
+    CHECK(objectTypeToString(ObjectType::Prop) == QStringLiteral("prop"), "ObjectType::Prop -> \"prop\"（舞台道具）");
     CHECK(objectTypeFromString(QStringLiteral("prop"), type) && type == ObjectType::Prop, "\"prop\" -> ObjectType::Prop");
     CHECK(objectTypeToString(ObjectType::Group) == QStringLiteral("group"), "ObjectType::Group -> \"group\"");
     CHECK(objectTypeFromString(QStringLiteral("group"), type) && type == ObjectType::Group, "\"group\" -> ObjectType::Group");
@@ -341,10 +341,10 @@ void testEditorCore()
         CHECK(screen.color == AppSettings::defaultPalette().at(1), "调色板轮转取色");
     }
 
-    // 道具（阶段13 解禁）：创建成功——shape 缺省（默认 100×100 矩形）、scale=1、
+    // 道具创建：shape 缺省（默认 100×100 矩形）、scale=1、
     // standable=true、调色板轮转、自动命名"道具1"并入全局重名
     CHECK(core.createObject(ObjectType::Prop, QPointF(-300.0, 400.0)),
-          "道具创建成功（阶段13 解禁）");
+          "道具创建成功");
     CHECK(runtime.fileData().objects.size() == 3, "道具经命令提交回数据层");
     {
         const ObjectData prop = runtime.fileData().objects.at(2);
@@ -355,7 +355,7 @@ void testEditorCore()
         CHECK(prop.color == AppSettings::defaultPalette().at(2), "道具调色板轮转取色");
     }
 
-    // 名字唯一性（演员与屏风统一校验，排除自身）
+    // 所有对象名字全局唯一，重名检测可排除自身
     CHECK(core.isNameTaken(QStringLiteral("角色1")), "重名检测命中");
     CHECK(core.isNameTaken(QStringLiteral("道具1")), "道具名并入全局重名检测");
     CHECK(!core.isNameTaken(QStringLiteral("角色1"), actorId), "重名检测排除自身");

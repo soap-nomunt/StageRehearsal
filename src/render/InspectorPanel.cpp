@@ -281,8 +281,8 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
     }
     m_stack->addWidget(m_pathPage); // 第五页（index 4）
 
-    // ---- 道具页（阶段13，第六页 index 5）：名称/位置/朝向/颜色 + 缩放 + 绑定 +
-    // 可供站立 + 编辑形状（占位禁用）+ 只读实际尺寸 ----
+    // ---- 道具页（第六页 index 5）：名称/位置/朝向/颜色 + 缩放 + 绑定 +
+    // 可供站立 + 编辑形状 + 只读实际尺寸 ----
     m_propPage = new QWidget(this);
     auto* propForm = new QFormLayout(m_propPage);
     m_propName = new QLineEdit(m_propPage);
@@ -593,7 +593,7 @@ void InspectorPanel::commitName()
         QMessageBox::warning(this, QStringLiteral("重命名失败"),
                              name.isEmpty()
                                  ? QStringLiteral("名字不能为空。")
-                                 : QStringLiteral("名字“%1”已被占用：演员与屏风的名字必须唯一。").arg(name));
+                                 : QStringLiteral("名字“%1”已被占用：对象名称必须全局唯一。").arg(name));
         edit->setText(object->name); // 恢复原名
         return;
     }

@@ -69,7 +69,7 @@
 // （点空白/单选他帧/轨道选中变化/播放开始/fileReplaced/命令提交后防御）。
 // 阶段13 追加：舞台道具基础对象 + 存档 v5——Create 对话框道具可选、创建
 // 默认矩形道具、Inspector 道具页（scale 绑定 delta 同步/standable/实际尺寸/
-// 编辑形状占位禁用）、拖拽/框选/复制粘贴/打帧/双帧幽灵/删除/撤销重做全链路。
+// 编辑形状入口）、拖拽/框选/复制粘贴/打帧/双帧幽灵/删除/撤销重做全链路。
 // 阶段13 任务2 追加：形状编辑器（ShapeEditDialog 模态 QTimer 驱动）——四种
 // 基础形状生成/顶点拖拽吸附/右键边上加点保形/删点下限/边弧编辑/自交非法禁
 // 确定/取消零变更/确定提交一条命令入撤销栈。
@@ -772,7 +772,7 @@ int main(int argc, char* argv[])
                   && radios.at(2)->text() == QStringLiteral("空对象")
                   && radios.at(3)->text() == QStringLiteral("舞台道具"),
               "四项文案：演员/屏风/空对象/舞台道具");
-        CHECK(radios.at(3)->isEnabled(), "舞台道具可选（阶段13 解禁）");
+        CHECK(radios.at(3)->isEnabled(), "舞台道具可选");
         CHECK(dialog.selectedType() == ObjectType::Actor, "默认选中演员");
         radios.at(3)->setChecked(true);
         CHECK(dialog.selectedType() == ObjectType::Prop, "舞台道具可选中");
@@ -3096,7 +3096,7 @@ int main(int argc, char* argv[])
         CHECK(near(scene18->itemById(propId18)->boundingRect().width(), 104.0, 1.0),
               "阶段13：默认矩形渲染 100cm + 描边余量");
 
-        // ---- Inspector 道具页：回显 + scale 绑定语义 + standable + 占位按钮 ----
+        // ---- Inspector 道具页：回显 + scale 绑定语义 + standable + 编辑形状按钮 ----
         core18->selection()->select(propId18);
         auto* propScaleX18 = w18.findChild<QDoubleSpinBox*>(QStringLiteral("propScaleXSpin"));
         auto* propScaleY18 = w18.findChild<QDoubleSpinBox*>(QStringLiteral("propScaleYSpin"));

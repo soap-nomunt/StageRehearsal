@@ -1,6 +1,6 @@
 #pragma once
 
-// 数据层类型定义，对应 doc/实施计划.md 的存档 Schema。
+// 数据层类型定义，对应 doc/实施方案.md 的存档 Schema。
 // 单位约定：长度 cm（浮点）、时间秒、角度度。
 // 角度制式：0° = y 轴正方向（朝下），逆时针增大；数据层只存该制式，
 // Qt 角度换算是渲染层的事，本层不做任何换算。
@@ -17,7 +17,7 @@ inline constexpr int kFileDataVersion = 6; // v6（阶段14）：FileData 新增
 enum class ObjectType {
     Actor,  // 演员
     Screen, // 屏风
-    Prop,   // 道具（仅预留占位，暂不可创建）
+    Prop,   // 舞台道具
     Group,  // 空对象/分组（纯组织节点：不渲染、不可视口选中、不影响子对象坐标）
 };
 
@@ -115,7 +115,7 @@ struct ObjectData {
     std::optional<PropShape> shape;  // 多边形+弧边形状；缺省 = 默认 100×100cm 矩形
     double scaleX = 1.0;             // 宽度缩放倍数（0.1~100，1 = 无缩放）
     double scaleY = 1.0;             // 深度缩放倍数
-    bool standable = true;           // 是否可供站立（false = 阻挡路径编辑，任务3）
+    bool standable = true;           // 是否可供站立；false 时在路径编辑与位置变更提交中作为障碍物
 };
 
 // 层级不变式：FileData.objects 列表顺序 = Hierarchy 的深度优先显示顺序
@@ -231,11 +231,11 @@ inline bool operator==(const TimelineData& a, const TimelineData& b)
 inline bool operator!=(const TimelineData& a, const TimelineData& b) { return !(a == b); }
 
 // ---- 项目资源库（阶段14，v6 新增）----
-// 首版仅音频和图片；资源清单随存档保存，实际文件复制到存档旁的
-// <存档主名>.resources/ 目录，JSON 只存相对路径。id 稳定且全库唯一，
-// 供后续音轨片段/图片用途引用；name 为项目内唯一别名，originalName 仅保存
-// 原始文件名（不保存外部源路径）。文件大小/尺寸/时长/解码与播放状态均为
-// 运行时数据，不进入 JSON。
+// 支持音频和图片；资源清单随存档保存，实际文件复制到项目根目录的
+// Assets/audio 或 Assets/images，JSON 只存相对路径。id 为全库唯一 UUID；
+// name 为 trim 后非空且项目内唯一的别名，originalName 仅保存原始文件名
+// （不保存外部源路径）。文件大小/尺寸/时长/解码与播放状态均为运行时数据，
+// 不进入 JSON。
 enum class ResourceType {
     Audio,
     Image,

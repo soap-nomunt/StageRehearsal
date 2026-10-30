@@ -1143,7 +1143,7 @@ void TimelineWidget::updateTransport()
     m_timeReadout->setText(QStringLiteral("t = %1 s / %2 s")
                                .arg(player->currentTime(), 0, 'f', 2)
                                .arg(player->duration(), 0, 'f', 1));
-    // 打帧按钮可用性：单选演员/屏风（多选/空选/空对象禁用）
+    // 打帧按钮可用性：单选演员/屏风/道具（多选/空选/空对象禁用）
     m_keyframeButton->setEnabled(m_editorCore->canKeyframeSelection());
 }
 

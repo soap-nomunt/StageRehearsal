@@ -9,10 +9,10 @@
 // 优先于对象表单）：名称（派生只读 <对象名>_<起>s至<止>s）、连线类型下拉、
 // 圆心角行（无路径点 1 行 / 有路径点 N+1 行，结构不变不重建防输入抖动）、
 // 选中路径点 t 行（弧长百分比）、只读段时长/弧长显示；一切提交走命令入撤销栈。
-// 阶段13：道具页（第六页）——名称/位置/朝向/颜色 + scaleX/scaleY（倍数制，
-// 步进 0.1、范围 0.1~100）+ xy 绑定切换（切换不改值；绑定后一方改动另一方
-// 同步增减同一增量）+ 可供站立复选框 + 编辑形状按钮（任务2 启用，本轮占位
-// 禁用）+ 只读实际尺寸（宽×深 cm，随 scale/shape 刷新）；一切提交走命令。
+// 道具页（第六页）：名称/位置/朝向/颜色 + scaleX/scaleY（倍数制，步进 0.1、
+// 范围 0.1~100）+ xy 绑定切换（切换不改值；绑定后一方改动另一方同步增减
+// 同一增量）+ 可供站立复选框 + 编辑形状按钮（打开模态形状编辑器，确定后
+// 提交一条命令）+ 只读实际尺寸（宽×深 cm，随 scale/shape 刷新）；一切提交走命令。
 
 #include <QWidget>
 
@@ -115,7 +115,7 @@ private:
     QDoubleSpinBox* m_propScaleY = nullptr;       // propScaleYSpin
     QPushButton* m_propScaleLink = nullptr;       // propScaleLinkButton（checkable 绑定切换）
     QCheckBox* m_propStandable = nullptr;         // propStandableCheck
-    QPushButton* m_propEditShape = nullptr;       // propEditShapeButton（本轮占位禁用）
+    QPushButton* m_propEditShape = nullptr;       // propEditShapeButton（打开形状编辑器）
     QLabel* m_propActualSize = nullptr;           // propActualSizeLabel（只读实际尺寸）
 
     // 资源页（阶段14，第七页 index 6）

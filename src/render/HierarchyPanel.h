@@ -1,6 +1,6 @@
 #pragma once
 
-// Hierarchy 对象列表面板：按 parentId 组装树（舞台不列出、不可选中；Prop 不出现），
+// Hierarchy 对象列表面板：演员、屏风、道具和空对象按 parentId 组装树（舞台不列出），
 // 行序遵循"列表顺序 = 深度优先显示顺序"不变式；显示名字（与 Inspector 一致）+ 颜色块；
 // 与视口选中双向同步（互发时防信号回环），选中子对象时自动展开父链；
 // 行上长按拖拽做层级整理（drop 不交给 Qt 改模型，落点经 EditorCore::reparent 走命令），
