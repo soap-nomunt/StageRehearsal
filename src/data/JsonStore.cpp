@@ -1,8 +1,11 @@
 #include "JsonStore.h"
 
+#include "ResourceFiles.h"
+
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QSet>
 
 #include <cmath>
 
@@ -106,6 +109,17 @@ QJsonObject pathToJson(const PathData& p)
     for (double angle : p.legAngles)
         legAngles.append(angle);
     obj[QStringLiteral("legAngles")] = legAngles;
+    return obj;
+}
+
+QJsonObject resourceToJson(const ResourceData& r)
+{
+    QJsonObject obj;
+    obj[QStringLiteral("id")] = r.id;
+    obj[QStringLiteral("type")] = resourceTypeToString(r.type);
+    obj[QStringLiteral("name")] = r.name;
+    obj[QStringLiteral("originalName")] = r.originalName;
+    obj[QStringLiteral("relativePath")] = r.relativePath;
     return obj;
 }
 
@@ -352,6 +366,45 @@ bool parsePrepArea(const QJsonValue& value, PrepAreaData& out, QString& error)
 
 // 移动路径（v4 新增）：节点缺失宽容为空列表（v3 及更早迁移）；type 非法宽容 Line；
 // legAngles 长度不符宽容补 0/截断（长度恒 = points.size()+1）
+// 项目资源（v6 新增）：节点缺失宽容为空列表（v5 及更早迁移）；存在则逐字段
+// 严格校验（id/type/name/originalName/relativePath），路径必须限制在资源根目录内。
+bool parseResourceData(const QJsonValue& value, ResourceData& out, QString& error)
+{
+    if (!value.isObject()) {
+        error = QStringLiteral("resources 数组元素不是对象");
+        return false;
+    }
+    const QJsonObject obj = value.toObject();
+    QString typeStr;
+    if (!readString(obj, QStringLiteral("id"), out.id)
+        || !readString(obj, QStringLiteral("type"), typeStr)
+        || !readString(obj, QStringLiteral("name"), out.name)
+        || !readString(obj, QStringLiteral("originalName"), out.originalName)
+        || !readString(obj, QStringLiteral("relativePath"), out.relativePath)) {
+        error = QStringLiteral("资源缺少 id/type/name/originalName/relativePath 字段");
+        return false;
+    }
+    if (out.id.isEmpty() || out.name.isEmpty() || out.originalName.isEmpty()) {
+        error = QStringLiteral("资源 id/name/originalName 不能为空");
+        return false;
+    }
+    if (out.originalName.contains(QLatin1Char('/'))
+        || out.originalName.contains(QLatin1Char('\\'))) {
+        error = QStringLiteral("资源 originalName 只能保存文件名，不能包含路径");
+        return false;
+    }
+    if (!resourceTypeFromString(typeStr, out.type)) {
+        error = QStringLiteral("未知资源类型：%1").arg(typeStr);
+        return false;
+    }
+    if (!ResourceFiles::isSafeRelativePath(out.relativePath)) {
+        error = QStringLiteral("资源 %1 的 relativePath 非法（必须是资源目录内的相对路径）")
+                    .arg(out.id);
+        return false;
+    }
+    return true;
+}
+
 bool parsePathData(const QJsonValue& value, PathData& out, QString& error)
 {
     if (!value.isObject()) {
@@ -432,6 +485,12 @@ QJsonObject JsonStore::toJson(const FileData& data)
     for (const PathData& p : data.paths)
         paths.append(pathToJson(p));
     root[QStringLiteral("paths")] = paths;
+
+    // v6 起恒写（空列表也写空数组）：项目资源库
+    QJsonArray resources;
+    for (const ResourceData& r : data.resources)
+        resources.append(resourceToJson(r));
+    root[QStringLiteral("resources")] = resources;
 
     QJsonObject timeline;
     timeline[QStringLiteral("duration")] = data.timeline.duration;
@@ -514,6 +573,29 @@ LoadResult JsonStore::fromJson(const QJsonObject& root)
             if (!parsePathData(entry, path, error))
                 return invalid(error);
             data.paths.append(path);
+        }
+    }
+
+    // resources（v6 新增）：节点缺失宽容为空列表（v5 及更早存档迁移）；
+    // 存在则必须是数组，逐项校验且 id/别名在库内唯一
+    const QJsonValue resourcesValue = root.value(QStringLiteral("resources"));
+    if (!resourcesValue.isUndefined()) {
+        if (!resourcesValue.isArray())
+            return invalid(QStringLiteral("resources 不是数组"));
+        QSet<QString> ids;
+        QSet<QString> names;
+        for (const QJsonValue& entry : resourcesValue.toArray()) {
+            ResourceData resource;
+            QString error;
+            if (!parseResourceData(entry, resource, error))
+                return invalid(error);
+            if (ids.contains(resource.id))
+                return invalid(QStringLiteral("资源 id 重复：%1").arg(resource.id));
+            if (names.contains(resource.name))
+                return invalid(QStringLiteral("资源别名重复：%1").arg(resource.name));
+            ids.insert(resource.id);
+            names.insert(resource.name);
+            data.resources.append(resource);
         }
     }
 

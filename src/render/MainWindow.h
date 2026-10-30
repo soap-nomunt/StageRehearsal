@@ -9,6 +9,7 @@ class QDockWidget;
 class EditorCore;
 class HierarchyPanel;
 class InspectorPanel;
+class ResourceWindow;
 class RuntimeData;
 class SettingsWindow;
 class StageScene;
@@ -56,6 +57,9 @@ private:
     // 打开定位"舞台"分类
     SettingsWindow* ensureSettingsWindow(); // 懒创建
     void openSettings();
+    // 资源库窗口（阶段14）：非模态单例，关闭只隐藏；导入前保存门卫复用另存为流程
+    ResourceWindow* ensureResourceWindow();
+    void openResourceWindow();
 
     RuntimeData* m_runtimeData = nullptr;
     EditorCore* m_editorCore = nullptr;
@@ -65,6 +69,7 @@ private:
     InspectorPanel* m_inspectorPanel = nullptr;
     TimelineWidget* m_timelineWidget = nullptr;
     SettingsWindow* m_settingsWindow = nullptr; // 设置窗口单例（懒创建；关闭只隐藏不销毁）
+    ResourceWindow* m_resourceWindow = nullptr; // 资源库窗口单例（阶段14，懒创建）
     QList<QDockWidget*> m_docks;
 
     QAction* m_undoAction = nullptr;

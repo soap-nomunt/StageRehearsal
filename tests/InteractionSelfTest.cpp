@@ -88,9 +88,11 @@
 #include "business/PathGeometry.h"
 #include "business/SelectionModel.h"
 #include "business/TimelinePlayer.h"
+#include "data/ResourceFiles.h"
 #include "data/RuntimeData.h"
 #include "render/MainWindow.h"
 #include "render/PrepAreaCanvas.h"
+#include "render/ResourceWindow.h"
 #include "render/SettingsWindow.h"
 #include "render/StageObjectItem.h"
 #include "render/StageScene.h"
@@ -111,7 +113,9 @@
 #include <QDoubleSpinBox>
 #include <QDropEvent>
 #include <QFile>
+#include <QFileInfo>
 #include <QGraphicsPathItem>
+#include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -2316,7 +2320,7 @@ int main(int argc, char* argv[])
         auto* runtime13 = w13.findChild<RuntimeData*>();
         auto* view13 = qobject_cast<StageView*>(w13.centralWidget());
         auto* scene13 = qobject_cast<StageScene*>(view13->scene());
-        CHECK(runtime13->fileData().version == 5, "阶段13：示例存档版本号 v5");
+        CHECK(runtime13->fileData().version == 6, "阶段14：示例存档迁移后版本号 v6");
         CHECK(runtime13->fileData().prepAreas.size() == 2, "阶段10：示例存档含 2 个准备区");
         CHECK(runtime13->fileData().prepAreas.at(0).color == QColor(QStringLiteral("#d35400")),
               "阶段11：示例存档 prep-001 显式独立色");
@@ -2454,8 +2458,8 @@ int main(int argc, char* argv[])
         QFile f2(v2Path);
         CHECK(f2.open(QIODevice::ReadOnly), "阶段10：回读另存文件");
         const QJsonDocument doc = QJsonDocument::fromJson(f2.readAll());
-        CHECK(doc.object().value(QStringLiteral("version")).toDouble() == 5.0,
-              "阶段13：保存后版本号升为 v5");
+        CHECK(doc.object().value(QStringLiteral("version")).toDouble() == 6.0,
+              "阶段14：保存后版本号升为 v6");
         CHECK(doc.object().contains(QStringLiteral("prepAreas"))
                   && doc.object().value(QStringLiteral("prepAreas")).isArray(),
               "阶段10：保存后恒写 prepAreas 数组（空也写 []）");
@@ -2485,7 +2489,7 @@ int main(int argc, char* argv[])
         QTest::qWaitForWindowExposed(&w15);
         CHECK(w15.openFromPath(v2LegacyPath), "阶段11：v2 旧存档（prepAreas 无 color 键）打开成功");
         auto* runtime15 = w15.findChild<RuntimeData*>();
-        CHECK(runtime15->fileData().version == 5, "阶段13：v2 迁移后版本号升为 v5");
+        CHECK(runtime15->fileData().version == 6, "阶段14：v2 迁移后版本号升为 v6");
         CHECK(runtime15->fileData().prepAreas.size() == 2, "阶段11：v2 迁移后准备区保留");
         bool allDerived15 = true;
         for (const PrepAreaData& area : runtime15->fileData().prepAreas)
@@ -2506,8 +2510,8 @@ int main(int argc, char* argv[])
         QFile f3(v3Path);
         CHECK(f3.open(QIODevice::ReadOnly), "阶段11：回读另存文件");
         const QJsonObject root15 = QJsonDocument::fromJson(f3.readAll()).object();
-        CHECK(root15.value(QStringLiteral("version")).toDouble() == 5.0,
-              "阶段13：另存后版本号升为 v5");
+        CHECK(root15.value(QStringLiteral("version")).toDouble() == 6.0,
+              "阶段14：另存后版本号升为 v6");
         const QJsonArray areas15 = root15.value(QStringLiteral("prepAreas")).toArray();
         bool allHaveColorKey = areas15.size() == 2;
         for (const QJsonValue& entry : areas15)
@@ -2551,7 +2555,7 @@ int main(int argc, char* argv[])
         QTest::qWaitForWindowExposed(&w17b);
         CHECK(w17b.openFromPath(v3LegacyPath), "阶段12：v3 旧存档（无 paths 键）打开成功");
         auto* runtime17b = w17b.findChild<RuntimeData*>();
-        CHECK(runtime17b->fileData().version == 5, "阶段13：v3 迁移后版本号升为 v5");
+        CHECK(runtime17b->fileData().version == 6, "阶段14：v3 迁移后版本号升为 v6");
         CHECK(runtime17b->fileData().paths.isEmpty(),
               "阶段12：v3 迁移后无路径（全部直线）");
         // 视觉零变化：段中点插值 = 直线匀速中点（与无路径旧行为逐位一致）
@@ -2568,8 +2572,8 @@ int main(int argc, char* argv[])
         QFile f4(v4Path);
         CHECK(f4.open(QIODevice::ReadOnly), "阶段12：回读另存文件");
         const QJsonObject root17b = QJsonDocument::fromJson(f4.readAll()).object();
-        CHECK(root17b.value(QStringLiteral("version")).toDouble() == 5.0,
-              "阶段13：另存后版本号升为 v5");
+        CHECK(root17b.value(QStringLiteral("version")).toDouble() == 6.0,
+              "阶段14：另存后版本号升为 v6");
         CHECK(root17b.contains(QStringLiteral("paths"))
                   && root17b.value(QStringLiteral("paths")).isArray(),
               "阶段12：另存后恒写 paths 数组（空也写 []）");
@@ -3761,7 +3765,7 @@ int main(int argc, char* argv[])
         QTest::qWaitForWindowExposed(&w21);
         CHECK(w21.openFromPath(v4LegacyPath), "阶段13：v4 旧存档（道具无道具字段）打开成功");
         auto* runtime21 = w21.findChild<RuntimeData*>();
-        CHECK(runtime21->fileData().version == 5, "阶段13：v4 迁移后版本号升为 v5");
+        CHECK(runtime21->fileData().version == 6, "阶段14：v4 迁移后版本号升为 v6");
         CHECK(runtime21->fileData().objects.size() == 1, "阶段13：v4 迁移后道具保留");
         {
             const ObjectData& prop = runtime21->fileData().objects.first();
@@ -3775,8 +3779,8 @@ int main(int argc, char* argv[])
         QFile f5(v5Path);
         CHECK(f5.open(QIODevice::ReadOnly), "阶段13：回读另存文件");
         const QJsonObject root21 = QJsonDocument::fromJson(f5.readAll()).object();
-        CHECK(root21.value(QStringLiteral("version")).toDouble() == 5.0,
-              "阶段13：另存后版本号升为 v5");
+        CHECK(root21.value(QStringLiteral("version")).toDouble() == 6.0,
+              "阶段14：另存后版本号升为 v6");
         const QJsonObject propJson =
             root21.value(QStringLiteral("objects")).toArray().first().toObject();
         CHECK(propJson.contains(QStringLiteral("scaleX"))
@@ -3901,6 +3905,83 @@ int main(int argc, char* argv[])
         }
 
         runtime21f->settings().setGridSnapEnabled(true); // 清理哨兵
+    }
+
+    // ---- 阶段14：资源库窗口 + Inspector 资源页 + 另存为复制资源目录 ----
+    {
+        MainWindow w22;
+        w22.show();
+        QTest::qWaitForWindowExposed(&w22);
+        CHECK(w22.openFromPath(demoPath), "阶段14：打开示例存档作为资源库测试项目");
+        auto* runtime22 = w22.findChild<RuntimeData*>();
+        auto* core22 = w22.findChild<EditorCore*>();
+        CHECK(runtime22 && core22, "阶段14：主窗口暴露运行时/业务核心");
+
+        const QString projectPath = tempDir.filePath(QStringLiteral("stage14-project.json"));
+        CHECK(w22.saveToPath(projectPath), "阶段14：资源库测试项目另存到临时目录");
+
+        const QString sourceImage = tempDir.filePath(QStringLiteral("curtain.png"));
+        QImage image(32, 16, QImage::Format_ARGB32_Premultiplied);
+        image.fill(QColor(QStringLiteral("#e67e22")));
+        CHECK(image.save(sourceImage), "阶段14：生成测试图片文件");
+
+        const QString resourceId = QStringLiteral("res-ui-001");
+        QString relativePath;
+        QString error;
+        CHECK(ResourceFiles::importResourceFile(projectPath, ResourceType::Image, resourceId,
+                                                 sourceImage, relativePath, error),
+              "阶段14：图片资源复制进项目资源目录");
+
+        ResourceData resource;
+        resource.id = resourceId;
+        resource.type = ResourceType::Image;
+        resource.name = QStringLiteral("幕布");
+        resource.originalName = QStringLiteral("curtain.png");
+        resource.relativePath = relativePath;
+        CHECK(core22->addResources({ resource }), "阶段14：资源清单命令提交");
+
+        QAction* resourceAction = nullptr;
+        for (QAction* action : w22.findChildren<QAction*>()) {
+            if (action->text() == QStringLiteral("资源库…")) {
+                resourceAction = action;
+                break;
+            }
+        }
+        CHECK(resourceAction != nullptr, "阶段14：窗口菜单含资源库入口");
+        resourceAction->trigger();
+        auto* resourceWindow = w22.findChild<ResourceWindow*>();
+        CHECK(resourceWindow && resourceWindow->isVisible(), "阶段14：资源库窗口打开");
+        auto* resourceList = resourceWindow
+            ? resourceWindow->findChild<QListWidget*>(QStringLiteral("resourceList"))
+            : nullptr;
+        CHECK(resourceList && resourceList->count() == 1,
+              "阶段14：资源库列表显示已导入资源");
+
+        core22->setActiveResource(resourceId);
+        auto* resourceNameEdit = w22.findChild<QLineEdit*>(QStringLiteral("resourceNameEdit"));
+        auto* resourceTypeLabel = w22.findChild<QLabel*>(QStringLiteral("resourceTypeLabel"));
+        auto* resourcePreview = w22.findChild<QLabel*>(QStringLiteral("resourceImagePreview"));
+        CHECK(resourceNameEdit && resourceNameEdit->text() == resource.name,
+              "阶段14：Inspector 资源页显示别名");
+        CHECK(resourceTypeLabel && resourceTypeLabel->text() == QStringLiteral("图片"),
+              "阶段14：Inspector 资源页显示类型");
+        CHECK(resourcePreview && !resourcePreview->pixmap().isNull(),
+              "阶段14：Inspector 图片预览已加载");
+
+        resourceWindow->close();
+        CHECK(!resourceWindow->isVisible(), "阶段14：资源库窗口关闭只隐藏");
+
+        const QString targetPath = tempDir.filePath(QStringLiteral("stage14-saved/stage.json"));
+        CHECK(w22.saveToPath(targetPath), "阶段14：含资源的项目另存为成功");
+        const QString copiedPath =
+            QDir(ResourceFiles::resourceRootDir(targetPath)).filePath(relativePath);
+        CHECK(QFileInfo::exists(copiedPath), "阶段14：另存为复制资源文件到新位置");
+
+        CHECK(core22->removeResource(resourceId), "阶段14：移除资源");
+        CHECK(QFileInfo::exists(copiedPath), "阶段14：移除资源不删除物理文件");
+        CHECK(core22->undo(), "阶段14：撤销移除资源");
+        CHECK(core22->findResource(resourceId) != nullptr, "阶段14：撤销后资源清单恢复");
+        CHECK(QFileInfo::exists(copiedPath), "阶段14：撤销后资源文件仍可用");
     }
 
     out() << Qt::endl;

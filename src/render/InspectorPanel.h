@@ -30,6 +30,7 @@ class QLineEdit;
 class QPushButton;
 class QStackedWidget;
 class QVBoxLayout;
+class ResourcePreviewLabel;
 struct ObjectData;
 
 class InspectorPanel : public QWidget {
@@ -55,6 +56,12 @@ private:
     void editPropShape();      // 编辑形状：模态编辑器 → 确定一条命令入撤销栈
     double propShapeWidth(const ObjectData& object) const;  // 未缩放形状包围盒宽
     double propShapeDepth(const ObjectData& object) const;  // 未缩放形状包围盒深
+    // ---- 阶段14：资源页 ----
+    void refreshResourcePage();   // 资源信息/预览（图片按 id+路径缓存，音频交播放器）
+    void commitResourceName();    // 别名编辑：空名/重名拒绝并恢复
+    void updateAudioControls();   // 播放器状态/位置/时长 → 按钮与文本（轻量）
+    void playActiveResource();    // 首次播放前确保播放器已加载当前音频
+    void clearResourcePreviewCache(); // 离开资源页/资源变化时清缓存（不重启试听）
 
     const ObjectData* currentObject() const; // 当前单选对象，否则空
     void updateColorButton(QPushButton* button, const QColor& color) const;
@@ -110,6 +117,28 @@ private:
     QCheckBox* m_propStandable = nullptr;         // propStandableCheck
     QPushButton* m_propEditShape = nullptr;       // propEditShapeButton（本轮占位禁用）
     QLabel* m_propActualSize = nullptr;           // propActualSizeLabel（只读实际尺寸）
+
+    // 资源页（阶段14，第七页 index 6）
+    QWidget* m_resourcePage = nullptr;
+    QLineEdit* m_resourceName = nullptr;          // resourceNameEdit（可编辑别名）
+    QLabel* m_resourceType = nullptr;             // resourceTypeLabel
+    QLabel* m_resourceOriginalName = nullptr;     // resourceOriginalNameLabel
+    QLabel* m_resourceRelativePath = nullptr;     // resourceRelativePathLabel
+    QLabel* m_resourceFileSize = nullptr;         // resourceFileSizeLabel
+    QLabel* m_resourceFileStatus = nullptr;       // resourceFileStatusLabel
+    QStackedWidget* m_resourceMediaStack = nullptr; // resourceMediaStack（图片页/音频页）
+    QWidget* m_resourceImagePage = nullptr;
+    ResourcePreviewLabel* m_resourceImagePreview = nullptr; // resourceImagePreview
+    QLabel* m_resourceImageInfo = nullptr;        // resourceImageInfoLabel
+    QWidget* m_resourceAudioPage = nullptr;
+    QLabel* m_resourceAudioStatus = nullptr;      // resourceAudioStatusLabel
+    QLabel* m_resourceAudioTime = nullptr;        // resourceAudioTimeLabel
+    QPushButton* m_resourcePlay = nullptr;        // resourcePlayButton
+    QPushButton* m_resourcePause = nullptr;       // resourcePauseButton
+    QPushButton* m_resourceStop = nullptr;        // resourceStopButton
+    QString m_resourceShownId;                    // 图片缓存对应的资源 id
+    QString m_resourceShownPath;                  // 图片缓存对应的相对路径
+    bool m_resourceImageValid = false;
 
     bool m_updating = false; // 刷新表单期间屏蔽提交槽，防信号回环
 };

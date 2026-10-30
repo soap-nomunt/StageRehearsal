@@ -3,10 +3,13 @@
 #include "KeyframeCommands.h"
 #include "PathCommands.h"
 #include "PathGeometry.h"
+#include "ResourceCommands.h"
 #include "data/AppSettings.h"
+#include "data/ResourceFiles.h"
 #include "data/RuntimeData.h"
 
 #include <QHash>
+#include <QUuid>
 
 namespace {
 
@@ -27,21 +30,54 @@ EditorCore::EditorCore(RuntimeData* runtimeData, QObject* parent)
     : QObject(parent)
     , m_runtimeData(runtimeData)
     , m_timelinePlayer(runtimeData)
+    , m_previewPlayer(runtimeData)
 {
     // 数据替换后剔除已不存在对象的选中态（删除/撤销/打开新文件等）
     connect(m_runtimeData, &RuntimeData::fileDataChanged, this, &EditorCore::pruneSelection);
     // 阶段12：命令提交/撤销后防御性剔除失效的选中路径（段或路径点不存在即清除）
     connect(m_runtimeData, &RuntimeData::fileDataChanged, this, &EditorCore::pruneActivePath);
+    // 阶段14：资源删除/撤销后剔除失效的资源选中态
+    connect(m_runtimeData, &RuntimeData::fileDataChanged,
+            this, &EditorCore::pruneActiveResource);
+    // 阶段14：选中资源后若其相对路径被修改（撤销/重做等），当前试听停止并重新加载
+    connect(m_runtimeData, &RuntimeData::fileDataChanged, this, [this] {
+        if (m_activeResourceId.isEmpty())
+            return;
+        const ResourceData* resource = findResource(m_activeResourceId);
+        if (!resource)
+            return; // pruneActiveResource 负责清空
+        if (!m_previewPlayer.resourceId().isEmpty()
+            && m_previewPlayer.resourceId() == resource->id
+            && m_previewPlayer.relativePath() != resource->relativePath) {
+            m_previewPlayer.setResource(*resource);
+        }
+    });
     // 阶段12：对象选中变化清除选中路径（选中对象 → Inspector 回对象页；
     // 清空选择不动路径——路径点方向键微调依赖无对象选中 + activePath 共存）
+    // 阶段14：对象选中同时清除资源选中态（Inspector 回对象页）
     connect(&m_selection, &SelectionModel::selectionChanged, this, [this] {
+        if (!m_selection.isEmpty())
+            setActiveResource(QString());
         if (m_activePath && !m_selection.isEmpty())
             setActivePath(std::nullopt);
     });
-    // 文件整体替换（新建/打开成功）时清空撤销栈
+    // 文件整体替换（新建/打开成功）时清空撤销栈与资源选中态/试听
     connect(m_runtimeData, &RuntimeData::fileReplaced, this, [this] {
         m_undoStack.clear();
         emit undoStackChanged();
+        m_activeResourceId.clear();
+        emit activeResourceChanged();
+        m_previewPlayer.clear();
+    });
+    // 阶段14：试听与时间轴播放互斥——开始试听暂停时间轴；时间轴开始播放
+    // 停止试听，之后不自动恢复
+    connect(&m_previewPlayer, &ResourcePreviewPlayer::playingChanged, this, [this](bool playing) {
+        if (playing && m_timelinePlayer.isPlaying())
+            m_timelinePlayer.pause();
+    });
+    connect(&m_timelinePlayer, &TimelinePlayer::playingChanged, this, [this](bool playing) {
+        if (playing)
+            m_previewPlayer.stop();
     });
 }
 
@@ -93,6 +129,24 @@ bool EditorCore::isNameTaken(const QString& name, const QString& excludeId) cons
 {
     for (const ObjectData& object : m_runtimeData->fileData().objects) {
         if (object.id != excludeId && object.name == name)
+            return true;
+    }
+    return false;
+}
+
+const ResourceData* EditorCore::findResource(const QString& id) const
+{
+    for (const ResourceData& resource : m_runtimeData->fileData().resources) {
+        if (resource.id == id)
+            return &resource;
+    }
+    return nullptr;
+}
+
+bool EditorCore::isResourceNameTaken(const QString& name, const QString& excludeId) const
+{
+    for (const ResourceData& resource : m_runtimeData->fileData().resources) {
+        if (resource.id != excludeId && resource.name == name)
             return true;
     }
     return false;
@@ -576,6 +630,13 @@ void EditorCore::setActiveSegment(const std::optional<SegmentRef>& segment)
         return; // 相同值不重发信号（渲染层每帧都可能重报）
     m_activeSegment = segment;
     emit activeSegmentChanged();
+    // 阶段14：选中双帧段（时间轴帧选择）时清除资源选中态（不重复触发
+    // setActiveResource，避免其反过来清掉刚设置的段）
+    if (segment && !m_activeResourceId.isEmpty()) {
+        m_activeResourceId.clear();
+        emit activeResourceChanged();
+        m_previewPlayer.clear();
+    }
     // 双帧态消失/变更：选中路径一并清除（白线只在双帧态显示）
     if (m_activePath
         && (!segment || m_activePath->segment != *segment))
@@ -588,6 +649,12 @@ void EditorCore::setActivePath(const std::optional<ActivePathRef>& path)
         return;
     m_activePath = path;
     emit activePathChanged();
+    // 阶段14：选中路径时清除资源选中态（Inspector 回路径页）
+    if (path && !m_activeResourceId.isEmpty()) {
+        m_activeResourceId.clear();
+        emit activeResourceChanged();
+        m_previewPlayer.clear();
+    }
 }
 
 void EditorCore::pruneActivePath()
@@ -615,6 +682,123 @@ void EditorCore::pruneActivePath()
             setActivePath(fixed);
         }
     }
+}
+
+// ---- 项目资源库（阶段14）----
+
+QString EditorCore::generateResourceId() const
+{
+    QSet<QString> taken;
+    for (const ResourceData& resource : m_runtimeData->fileData().resources)
+        taken.insert(resource.id);
+    QString id;
+    do {
+        id = QStringLiteral("res-")
+            + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    } while (taken.contains(id));
+    return id;
+}
+
+QString EditorCore::uniqueResourceName(const QString& baseName,
+                                       const QSet<QString>& reservedNames) const
+{
+    QString base = baseName.trimmed();
+    if (base.isEmpty())
+        base = QStringLiteral("资源");
+    const auto taken = [this, &reservedNames](const QString& name) {
+        return reservedNames.contains(name) || isResourceNameTaken(name);
+    };
+    if (!taken(base))
+        return base;
+    for (int n = 2;; ++n) {
+        const QString candidate = QStringLiteral("%1 (%2)").arg(base).arg(n);
+        if (!taken(candidate))
+            return candidate;
+    }
+}
+
+bool EditorCore::addResources(const QList<ResourceData>& resources)
+{
+    if (resources.isEmpty())
+        return false;
+
+    QSet<QString> ids;
+    QSet<QString> names;
+    for (const ResourceData& resource : m_runtimeData->fileData().resources) {
+        ids.insert(resource.id);
+        names.insert(resource.name);
+    }
+    for (const ResourceData& resource : resources) {
+        if (resource.id.isEmpty() || resource.name.trimmed().isEmpty()
+            || resource.originalName.trimmed().isEmpty())
+            return false;
+        if (resource.originalName.contains(QLatin1Char('/'))
+            || resource.originalName.contains(QLatin1Char('\\')))
+            return false;
+        if (!ResourceFiles::isSafeRelativePath(resource.relativePath))
+            return false;
+        if (ids.contains(resource.id) || names.contains(resource.name))
+            return false; // id/别名全库唯一（批量内也查重）
+        ids.insert(resource.id);
+        names.insert(resource.name);
+    }
+    return executeCommand(std::make_unique<AddResourcesCommand>(resources));
+}
+
+bool EditorCore::removeResource(const QString& id)
+{
+    if (!findResource(id))
+        return false;
+    return executeCommand(std::make_unique<RemoveResourceCommand>(id));
+}
+
+bool EditorCore::renameResource(const QString& id, const QString& name)
+{
+    const ResourceData* resource = findResource(id);
+    const QString trimmed = name.trimmed();
+    if (!resource || trimmed.isEmpty() || trimmed == resource->name)
+        return false;
+    if (isResourceNameTaken(trimmed, id))
+        return false;
+    return executeCommand(std::make_unique<RenameResourceCommand>(id, trimmed));
+}
+
+void EditorCore::setActiveResource(const QString& id)
+{
+    if (id.isEmpty()) {
+        if (m_activeResourceId.isEmpty())
+            return;
+        m_activeResourceId.clear();
+        emit activeResourceChanged();
+        m_previewPlayer.clear();
+        return;
+    }
+
+    const ResourceData* resource = findResource(id);
+    if (!resource) {
+        setActiveResource(QString());
+        return;
+    }
+    const ResourceType type = resource->type;
+    if (m_activeResourceId != id) {
+        m_activeResourceId = id;
+        emit activeResourceChanged();
+    }
+    // 选择仲裁：资源选中清除舞台对象选择、双帧段和路径选择
+    m_selection.clear();
+    setActiveSegment(std::nullopt);
+    setActivePath(std::nullopt);
+    // 图片资源不保留音频试听；音频由 Inspector 资源页加载元数据
+    if (type != ResourceType::Audio)
+        m_previewPlayer.clear();
+}
+
+void EditorCore::pruneActiveResource()
+{
+    if (m_activeResourceId.isEmpty())
+        return;
+    if (!findResource(m_activeResourceId))
+        setActiveResource(QString());
 }
 
 // ---- 移动路径（阶段12，全部走命令入撤销栈）----

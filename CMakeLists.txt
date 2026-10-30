@@ -10,7 +10,7 @@ if(MSVC)
     add_compile_options(/utf-8)
 endif()
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Test)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Core Gui Widgets Test Multimedia)
 
 qt_standard_project_setup()
 
@@ -23,6 +23,8 @@ qt_add_executable(StageRehearsal
     src/data/AppSettings.cpp
     src/data/RuntimeData.h
     src/data/RuntimeData.cpp
+    src/data/ResourceFiles.h
+    src/data/ResourceFiles.cpp
     src/business/EditorCore.h
     src/business/EditorCore.cpp
     src/business/Commands.h
@@ -38,6 +40,10 @@ qt_add_executable(StageRehearsal
     src/business/PathGeometry.h
     src/business/PathCommands.h
     src/business/PathCommands.cpp
+    src/business/ResourceCommands.h
+    src/business/ResourceCommands.cpp
+    src/business/ResourcePreviewPlayer.h
+    src/business/ResourcePreviewPlayer.cpp
     src/render/MainWindow.h
     src/render/MainWindow.cpp
     src/render/RenderUtil.h
@@ -58,6 +64,8 @@ qt_add_executable(StageRehearsal
     src/render/HierarchyPanel.cpp
     src/render/InspectorPanel.h
     src/render/InspectorPanel.cpp
+    src/render/ResourceWindow.h
+    src/render/ResourceWindow.cpp
     src/render/dialogs/CreateObjectDialog.h
     src/render/dialogs/CreateObjectDialog.cpp
     src/render/dialogs/ShapeEditDialog.h
@@ -83,7 +91,7 @@ endforeach()
 
 target_include_directories(StageRehearsal PRIVATE src)
 
-target_link_libraries(StageRehearsal PRIVATE Qt6::Widgets)
+target_link_libraries(StageRehearsal PRIVATE Qt6::Widgets Qt6::Multimedia)
 
 # 数据层自测（阶段1 验收用，独立目标）
 # 阶段3 起同时覆盖业务层命令/选择模型/EditorCore（均不依赖 Widgets）
@@ -93,6 +101,7 @@ add_executable(DataLayerSelfTest
     src/data/AppSettings.cpp
     src/data/JsonStore.cpp
     src/data/RuntimeData.cpp
+    src/data/ResourceFiles.cpp
     src/business/Commands.cpp
     src/business/UndoStack.cpp
     src/business/EditorCore.cpp
@@ -100,11 +109,13 @@ add_executable(DataLayerSelfTest
     src/business/TimelinePlayer.cpp
     src/business/KeyframeCommands.cpp
     src/business/PathCommands.cpp
+    src/business/ResourceCommands.cpp
+    src/business/ResourcePreviewPlayer.cpp
 )
 
 target_include_directories(DataLayerSelfTest PRIVATE src)
 
-target_link_libraries(DataLayerSelfTest PRIVATE Qt6::Core Qt6::Gui)
+target_link_libraries(DataLayerSelfTest PRIVATE Qt6::Core Qt6::Gui Qt6::Multimedia)
 
 # 交互自测（阶段3 验收辅助，独立目标）：QTest 合成事件驱动真实 MainWindow，
 # 覆盖需求 11~14 条的视口/面板交互路径。运行：QT_QPA_PLATFORM=offscreen
@@ -113,6 +124,7 @@ add_executable(InteractionSelfTest
     src/data/AppSettings.cpp
     src/data/JsonStore.cpp
     src/data/RuntimeData.cpp
+    src/data/ResourceFiles.cpp
     src/business/Commands.cpp
     src/business/UndoStack.cpp
     src/business/EditorCore.cpp
@@ -120,6 +132,8 @@ add_executable(InteractionSelfTest
     src/business/TimelinePlayer.cpp
     src/business/KeyframeCommands.cpp
     src/business/PathCommands.cpp
+    src/business/ResourceCommands.cpp
+    src/business/ResourcePreviewPlayer.cpp
     src/render/MainWindow.cpp
     src/render/StageScene.cpp
     src/render/StageView.cpp
@@ -129,6 +143,7 @@ add_executable(InteractionSelfTest
     src/render/StageObjectItem.cpp
     src/render/HierarchyPanel.cpp
     src/render/InspectorPanel.cpp
+    src/render/ResourceWindow.cpp
     src/render/TimelineWidget.cpp
     src/render/dialogs/CreateObjectDialog.cpp
     src/render/dialogs/ShapeEditDialog.cpp
@@ -139,4 +154,4 @@ add_executable(InteractionSelfTest
 
 target_include_directories(InteractionSelfTest PRIVATE src)
 
-target_link_libraries(InteractionSelfTest PRIVATE Qt6::Widgets Qt6::Test Qt6::GuiPrivate)
+target_link_libraries(InteractionSelfTest PRIVATE Qt6::Widgets Qt6::Test Qt6::GuiPrivate Qt6::Multimedia)

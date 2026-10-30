@@ -2,6 +2,7 @@
 
 #include "HierarchyPanel.h"
 #include "InspectorPanel.h"
+#include "ResourceWindow.h"
 #include "SettingsWindow.h"
 #include "StageScene.h"
 #include "StageView.h"
@@ -10,6 +11,7 @@
 #include "business/EditorCore.h"
 #include "business/SelectionModel.h"
 #include "data/AppSettings.h"
+#include "data/ResourceFiles.h"
 #include "data/RuntimeData.h"
 
 #include <QAction>
@@ -28,6 +30,17 @@
 namespace {
 
 const char kArchiveFilter[] = "舞台剧存档 (*.json)"; // 文件对话框过滤器
+
+bool sameArchivePath(const QString& a, const QString& b)
+{
+    const QString left = QFileInfo(a).absoluteFilePath();
+    const QString right = QFileInfo(b).absoluteFilePath();
+#if defined(Q_OS_WIN)
+    return left.compare(right, Qt::CaseInsensitive) == 0;
+#else
+    return left == right;
+#endif
+}
 
 } // namespace
 
@@ -117,6 +130,18 @@ void MainWindow::dumpScreenshotForSelfTest(const QString& path)
 
 bool MainWindow::saveToPath(const QString& path)
 {
+    // 阶段14：另存为改变资源根目录时，先完整复制当前资源目录（含未引用文件，
+    // 保证撤销历史仍可恢复资源）；复制失败中止，不切换当前存档路径
+    const QString currentPath = m_runtimeData->currentFilePath();
+    if (!currentPath.isEmpty() && !sameArchivePath(currentPath, path)) {
+        QString error;
+        if (!ResourceFiles::copyResourceTree(currentPath, path, error)) {
+            QMessageBox::critical(
+                this, QStringLiteral("保存失败"),
+                QStringLiteral("复制项目资源目录失败，未保存到 %1：\n%2").arg(path, error));
+            return false;
+        }
+    }
     // 保存不是编辑操作：不经过命令栈、不清撤销栈
     const SaveResult result = m_runtimeData->saveFile(path, m_runtimeData->fileData());
     if (!result.ok) {
@@ -366,6 +391,9 @@ void MainWindow::setupMenus()
     connect(settingsAction, &QAction::triggered, this, &MainWindow::openSettings);
 
     QMenu* windowMenu = menuBar()->addMenu(QStringLiteral("窗口(&W)"));
+    QAction* resourceAction = windowMenu->addAction(QStringLiteral("资源库…"));
+    connect(resourceAction, &QAction::triggered, this, &MainWindow::openResourceWindow);
+    windowMenu->addSeparator();
     for (QDockWidget* dock : m_docks)
         windowMenu->addAction(dock->toggleViewAction());
 }
@@ -405,4 +433,20 @@ SettingsWindow* MainWindow::ensureSettingsWindow()
 void MainWindow::openSettings()
 {
     ensureSettingsWindow()->openCategory(SettingsWindow::Category::Stage);
+}
+
+// ---- 项目资源库窗口（阶段14）----
+
+ResourceWindow* MainWindow::ensureResourceWindow()
+{
+    if (!m_resourceWindow) {
+        m_resourceWindow = new ResourceWindow(
+            m_editorCore, [this] { return saveWithDialog(); }, this);
+    }
+    return m_resourceWindow;
+}
+
+void MainWindow::openResourceWindow()
+{
+    ensureResourceWindow()->openWindow();
 }

@@ -12,7 +12,7 @@
 
 #include <optional>
 
-inline constexpr int kFileDataVersion = 5; // v5（阶段13）：ObjectData 新增道具字段（shape/scaleX/scaleY/standable，仅 type=prop 有意义）；v1~v4 存档宽容迁移（本无道具，缺省即默认）
+inline constexpr int kFileDataVersion = 6; // v6（阶段14）：FileData 新增资源库（resources）；v1~v5 缺 resources 节点宽容迁移为空列表
 
 enum class ObjectType {
     Actor,  // 演员
@@ -230,16 +230,55 @@ inline bool operator==(const TimelineData& a, const TimelineData& b)
 }
 inline bool operator!=(const TimelineData& a, const TimelineData& b) { return !(a == b); }
 
+// ---- 项目资源库（阶段14，v6 新增）----
+// 首版仅音频和图片；资源清单随存档保存，实际文件复制到存档旁的
+// <存档主名>.resources/ 目录，JSON 只存相对路径。id 稳定且全库唯一，
+// 供后续音轨片段/图片用途引用；name 为项目内唯一别名，originalName 仅保存
+// 原始文件名（不保存外部源路径）。文件大小/尺寸/时长/解码与播放状态均为
+// 运行时数据，不进入 JSON。
+enum class ResourceType {
+    Audio,
+    Image,
+};
+
+inline QString resourceTypeToString(ResourceType type)
+{
+    return type == ResourceType::Image ? QStringLiteral("image") : QStringLiteral("audio");
+}
+
+inline bool resourceTypeFromString(const QString& str, ResourceType& out)
+{
+    if (str == QLatin1String("audio")) { out = ResourceType::Audio; return true; }
+    if (str == QLatin1String("image")) { out = ResourceType::Image; return true; }
+    return false;
+}
+
+struct ResourceData {
+    QString id;
+    ResourceType type = ResourceType::Audio;
+    QString name;
+    QString originalName;
+    QString relativePath; // 资源根目录内的相对路径（"/" 分隔），禁止绝对路径与 ..
+};
+
+inline bool operator==(const ResourceData& a, const ResourceData& b)
+{
+    return a.id == b.id && a.type == b.type && a.name == b.name
+        && a.originalName == b.originalName && a.relativePath == b.relativePath;
+}
+inline bool operator!=(const ResourceData& a, const ResourceData& b) { return !(a == b); }
+
 struct FileData {
     int version = kFileDataVersion;
     StageData stage;
     QList<ObjectData> objects;
     QList<PrepAreaData> prepAreas; // 台下准备区（v2 新增；v1 存档迁移为空列表）
     QList<PathData> paths;         // 移动路径（v4 新增；v3 及更早存档迁移为空列表）
+    QList<ResourceData> resources; // 项目资源库（v6 新增；v1~v5 迁移为空列表）
     TimelineData timeline;
 
     // 新建文件默认值：舞台 1200×800cm、centerOffset=0、时间轴 60s、空对象、空准备区、
-    // 空路径、空场次标签
+    // 空路径、空资源库、空场次标签
     static FileData createDefault() { return FileData{}; }
 };
 
@@ -248,6 +287,7 @@ inline bool operator==(const FileData& a, const FileData& b)
     return a.version == b.version && a.stage == b.stage && a.objects == b.objects
         && a.prepAreas == b.prepAreas // dirty 内容比较依赖本字段，漏加 = dirty 跟踪静默失效
         && a.paths == b.paths        // 同上（v4）
+        && a.resources == b.resources // 同上（v6：漏加 = 资源修改不弄脏存档）
         && a.timeline == b.timeline;
 }
 inline bool operator!=(const FileData& a, const FileData& b) { return !(a == b); }

@@ -5,20 +5,28 @@
 #include "business/EditorCore.h"
 #include "business/PathCommands.h" // resolveSegmentEndpoints
 #include "business/PathGeometry.h"
+#include "business/ResourcePreviewPlayer.h"
 #include "business/SelectionModel.h"
 #include "business/TimelinePlayer.h"
+#include "data/ResourceFiles.h"
 #include "data/RuntimeData.h"
 
 #include <QColorDialog>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDoubleSpinBox>
+#include <QFileInfo>
 #include <QFormLayout>
 #include <QHBoxLayout>
+#include <QImage>
+#include <QImageReader>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPixmap>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QSizePolicy>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
@@ -55,7 +63,81 @@ double normalizedRotation(double degrees)
     return degrees < 0.0 ? degrees + 360.0 : degrees;
 }
 
+QString formatByteSize(qint64 bytes)
+{
+    if (bytes < 1024)
+        return QStringLiteral("%1 B").arg(bytes);
+    const double kb = bytes / 1024.0;
+    if (kb < 1024.0)
+        return QStringLiteral("%1 KB").arg(kb, 0, 'f', 1);
+    return QStringLiteral("%1 MB").arg(kb / 1024.0, 0, 'f', 2);
+}
+
+QString formatMediaTime(qint64 milliseconds)
+{
+    const qint64 totalSeconds = qMax<qint64>(0, milliseconds) / 1000;
+    return QStringLiteral("%1:%2")
+        .arg(totalSeconds / 60)
+        .arg(totalSeconds % 60, 2, 10, QLatin1Char('0'));
+}
+
 } // namespace
+
+// 等比预览标签：只缩小不放大；可用区域变化时按原图重新缩放（不重复读取文件）
+class ResourcePreviewLabel : public QLabel {
+public:
+    explicit ResourcePreviewLabel(QWidget* parent = nullptr)
+        : QLabel(parent)
+    {
+        setAlignment(Qt::AlignCenter);
+        setMinimumHeight(180);
+        setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Expanding);
+        setStyleSheet(QStringLiteral("border: 1px solid #3a3a3a; color: #888888;"));
+    }
+
+    void setImage(const QImage& image)
+    {
+        m_image = image;
+        if (m_image.isNull()) {
+            QLabel::clear();
+            return;
+        }
+        updatePixmap();
+    }
+
+    void clearImage()
+    {
+        m_image = QImage();
+        QLabel::clear();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent* event) override
+    {
+        QLabel::resizeEvent(event);
+        updatePixmap();
+    }
+
+private:
+    void updatePixmap()
+    {
+        if (m_image.isNull() || m_updating)
+            return;
+        m_updating = true;
+        QSize available = size() - QSize(8, 8);
+        available.setWidth(qMax(1, available.width()));
+        available.setHeight(qMax(1, available.height()));
+        QSize target = m_image.size();
+        if (target.width() > available.width() || target.height() > available.height())
+            target.scale(available, Qt::KeepAspectRatio);
+        setPixmap(QPixmap::fromImage(
+            m_image.scaled(target, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+        m_updating = false;
+    }
+
+    QImage m_image;
+    bool m_updating = false;
+};
 
 InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
     : QWidget(parent)
@@ -255,6 +337,88 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
     propForm->addRow(QStringLiteral("实际尺寸"), m_propActualSize);
     m_stack->addWidget(m_propPage);
 
+    // ---- 资源页（阶段14，第七页 index 6）：公共信息 + 图片预览 / 音频试听 ----
+    m_resourcePage = new QWidget(this);
+    {
+        auto* resourceLayout = new QVBoxLayout(m_resourcePage);
+        resourceLayout->setContentsMargins(4, 4, 4, 4);
+        resourceLayout->setSpacing(4);
+
+        auto* resourceForm = new QFormLayout();
+        resourceForm->setContentsMargins(0, 0, 0, 0);
+        m_resourceName = new QLineEdit(m_resourcePage);
+        m_resourceName->setObjectName(QStringLiteral("resourceNameEdit"));
+        m_resourceType = new QLabel(m_resourcePage);
+        m_resourceType->setObjectName(QStringLiteral("resourceTypeLabel"));
+        m_resourceOriginalName = new QLabel(m_resourcePage);
+        m_resourceOriginalName->setObjectName(QStringLiteral("resourceOriginalNameLabel"));
+        m_resourceRelativePath = new QLabel(m_resourcePage);
+        m_resourceRelativePath->setObjectName(QStringLiteral("resourceRelativePathLabel"));
+        m_resourceFileSize = new QLabel(m_resourcePage);
+        m_resourceFileSize->setObjectName(QStringLiteral("resourceFileSizeLabel"));
+        m_resourceFileStatus = new QLabel(m_resourcePage);
+        m_resourceFileStatus->setObjectName(QStringLiteral("resourceFileStatusLabel"));
+        for (QLabel* label : { m_resourceType, m_resourceOriginalName, m_resourceRelativePath,
+                               m_resourceFileSize, m_resourceFileStatus }) {
+            label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+            label->setWordWrap(true);
+        }
+        resourceForm->addRow(QStringLiteral("别名"), m_resourceName);
+        resourceForm->addRow(QStringLiteral("类型"), m_resourceType);
+        resourceForm->addRow(QStringLiteral("原始文件名"), m_resourceOriginalName);
+        resourceForm->addRow(QStringLiteral("相对路径"), m_resourceRelativePath);
+        resourceForm->addRow(QStringLiteral("文件大小"), m_resourceFileSize);
+        resourceForm->addRow(QStringLiteral("文件状态"), m_resourceFileStatus);
+        resourceLayout->addLayout(resourceForm);
+
+        m_resourceMediaStack = new QStackedWidget(m_resourcePage);
+        m_resourceMediaStack->setObjectName(QStringLiteral("resourceMediaStack"));
+
+        m_resourceImagePage = new QWidget(m_resourceMediaStack);
+        auto* imageLayout = new QVBoxLayout(m_resourceImagePage);
+        imageLayout->setContentsMargins(0, 0, 0, 0);
+        imageLayout->setSpacing(4);
+        m_resourceImagePreview = new ResourcePreviewLabel(m_resourceImagePage);
+        m_resourceImagePreview->setObjectName(QStringLiteral("resourceImagePreview"));
+        m_resourceImageInfo = new QLabel(m_resourceImagePage);
+        m_resourceImageInfo->setObjectName(QStringLiteral("resourceImageInfoLabel"));
+        m_resourceImageInfo->setStyleSheet(QStringLiteral("color: #888888;"));
+        m_resourceImageInfo->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        imageLayout->addWidget(m_resourceImagePreview, 1);
+        imageLayout->addWidget(m_resourceImageInfo);
+        m_resourceMediaStack->addWidget(m_resourceImagePage);
+
+        m_resourceAudioPage = new QWidget(m_resourceMediaStack);
+        auto* audioLayout = new QVBoxLayout(m_resourceAudioPage);
+        audioLayout->setContentsMargins(0, 0, 0, 0);
+        audioLayout->setSpacing(4);
+        m_resourceAudioStatus = new QLabel(m_resourceAudioPage);
+        m_resourceAudioStatus->setObjectName(QStringLiteral("resourceAudioStatusLabel"));
+        m_resourceAudioStatus->setWordWrap(true);
+        m_resourceAudioTime = new QLabel(m_resourceAudioPage);
+        m_resourceAudioTime->setObjectName(QStringLiteral("resourceAudioTimeLabel"));
+        m_resourceAudioTime->setStyleSheet(QStringLiteral("color: #888888;"));
+        auto* audioButtons = new QHBoxLayout();
+        m_resourcePlay = new QPushButton(QStringLiteral("播放"), m_resourceAudioPage);
+        m_resourcePlay->setObjectName(QStringLiteral("resourcePlayButton"));
+        m_resourcePause = new QPushButton(QStringLiteral("暂停"), m_resourceAudioPage);
+        m_resourcePause->setObjectName(QStringLiteral("resourcePauseButton"));
+        m_resourceStop = new QPushButton(QStringLiteral("停止"), m_resourceAudioPage);
+        m_resourceStop->setObjectName(QStringLiteral("resourceStopButton"));
+        audioButtons->addWidget(m_resourcePlay);
+        audioButtons->addWidget(m_resourcePause);
+        audioButtons->addWidget(m_resourceStop);
+        audioButtons->addStretch();
+        audioLayout->addWidget(m_resourceAudioStatus);
+        audioLayout->addWidget(m_resourceAudioTime);
+        audioLayout->addLayout(audioButtons);
+        audioLayout->addStretch();
+        m_resourceMediaStack->addWidget(m_resourceAudioPage);
+
+        resourceLayout->addWidget(m_resourceMediaStack, 1);
+    }
+    m_stack->addWidget(m_resourcePage);
+
     // 修改立即生效：提交即走命令
     connect(m_actorName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
     connect(m_screenName, &QLineEdit::editingFinished, this, &InspectorPanel::commitName);
@@ -281,17 +445,40 @@ InspectorPanel::InspectorPanel(EditorCore* editorCore, QWidget* parent)
             this, &InspectorPanel::commitPathType);
     connect(m_pathPointT, &QDoubleSpinBox::valueChanged,
             this, &InspectorPanel::commitPathPointT);
+    // 阶段14：资源页（别名提交 + 试听控制）
+    connect(m_resourceName, &QLineEdit::editingFinished,
+            this, &InspectorPanel::commitResourceName);
+    connect(m_resourcePlay, &QPushButton::clicked,
+            this, &InspectorPanel::playActiveResource);
+    ResourcePreviewPlayer* preview = m_editorCore->previewPlayer();
+    connect(m_resourcePause, &QPushButton::clicked, preview, &ResourcePreviewPlayer::pause);
+    connect(m_resourceStop, &QPushButton::clicked, preview, &ResourcePreviewPlayer::stop);
+    connect(preview, &ResourcePreviewPlayer::stateChanged,
+            this, &InspectorPanel::updateAudioControls);
+    connect(preview, &ResourcePreviewPlayer::playingChanged,
+            this, &InspectorPanel::updateAudioControls);
+    connect(preview, &ResourcePreviewPlayer::positionChanged,
+            this, [this](qint64) { updateAudioControls(); });
+    connect(preview, &ResourcePreviewPlayer::durationChanged,
+            this, [this](qint64) { updateAudioControls(); });
 
     connect(m_editorCore->selection(), &SelectionModel::selectionChanged,
             this, &InspectorPanel::refresh);
     connect(m_editorCore->runtimeData(), &RuntimeData::fileDataChanged,
             this, &InspectorPanel::refresh);
-    // 阶段12：选中路径变化 → 切路径页/回对象页
+    // 阶段12：选中路径变化 → 切路径页/回对象页；阶段14：资源选中变化 → 资源页
     connect(m_editorCore, &EditorCore::activePathChanged,
             this, &InspectorPanel::refresh);
-    // 游标移动/播放 tick 后，位置/朝向字段跟随当前时刻插值结果刷新
+    connect(m_editorCore, &EditorCore::activeResourceChanged,
+            this, &InspectorPanel::refresh);
+    // 游标移动/播放 tick 后，位置/朝向字段跟随当前时刻插值结果刷新；
+    // 资源页不受时间影响，跳过 60Hz 刷新路径（图片/文件/媒体源不重载）
     connect(m_editorCore->timelinePlayer(), &TimelinePlayer::currentTimeChanged,
-            this, [this](double) { refresh(); });
+            this, [this](double) {
+                if (!m_editorCore->activeResourceId().isEmpty())
+                    return;
+                refresh();
+            });
 
     refresh();
 }
@@ -307,6 +494,15 @@ void InspectorPanel::refresh()
     if (m_updating)
         return;
     m_updating = true;
+
+    // 阶段14：资源选中优先（选择仲裁保证与对象/路径互斥）
+    if (!m_editorCore->activeResourceId().isEmpty()) {
+        refreshResourcePage();
+        m_stack->setCurrentWidget(m_resourcePage);
+        m_updating = false;
+        return;
+    }
+    clearResourcePreviewCache(); // 离开资源页：释放图片缓存（试听清理由 EditorCore 负责）
 
     // 阶段12：选中路径优先于对象表单（点选白线 → 路径页）
     if (m_editorCore->activePath()) {
@@ -662,4 +858,167 @@ double InspectorPanel::propShapeDepth(const ObjectData& object) const
         hi = qMax(hi, v.y);
     }
     return hi - lo;
+}
+
+// ---- 阶段14：资源页 ----
+
+void InspectorPanel::refreshResourcePage()
+{
+    const ResourceData* resource = m_editorCore->findResource(m_editorCore->activeResourceId());
+    if (!resource) {
+        m_stack->setCurrentWidget(m_emptyLabel);
+        return;
+    }
+
+    m_resourceName->setText(resource->name);
+    m_resourceType->setText(resource->type == ResourceType::Audio ? QStringLiteral("音频")
+                                                                 : QStringLiteral("图片"));
+    m_resourceOriginalName->setText(resource->originalName);
+    m_resourceRelativePath->setText(resource->relativePath);
+
+    const QString absolutePath = ResourceFiles::resolveResourcePath(
+        m_editorCore->runtimeData()->currentFilePath(), resource->relativePath);
+    const QFileInfo fileInfo(absolutePath);
+    const bool available =
+        !absolutePath.isEmpty() && fileInfo.exists() && fileInfo.isFile() && fileInfo.isReadable();
+    m_resourceFileStatus->setText(available ? QStringLiteral("可用")
+                                            : QStringLiteral("文件缺失或不可读取"));
+    m_resourceFileSize->setText(available ? formatByteSize(fileInfo.size())
+                                          : QStringLiteral("—"));
+
+    if (resource->type == ResourceType::Image) {
+        m_resourceMediaStack->setCurrentWidget(m_resourceImagePage);
+        // 图片资源不保留音频试听
+        if (!m_editorCore->previewPlayer()->resourceId().isEmpty())
+            m_editorCore->previewPlayer()->clear();
+        if (m_resourceShownId != resource->id
+            || m_resourceShownPath != resource->relativePath) {
+            m_resourceShownId = resource->id;
+            m_resourceShownPath = resource->relativePath;
+            m_resourceImageValid = false;
+            m_resourceImagePreview->clearImage();
+            m_resourceImageInfo->clear();
+            if (available) {
+                QImageReader reader(absolutePath);
+                reader.setAutoTransform(true);
+                const QImage image = reader.read();
+                if (image.isNull()) {
+                    m_resourceImagePreview->setText(
+                        QStringLiteral("无法读取图片：%1").arg(reader.errorString()));
+                    m_resourceImageInfo->setText(QStringLiteral("预览不可用"));
+                } else {
+                    m_resourceImagePreview->setImage(image);
+                    m_resourceImageValid = true;
+                    m_resourceImageInfo->setText(
+                        QStringLiteral("%1 × %2 px").arg(image.width()).arg(image.height()));
+                }
+            } else {
+                m_resourceImagePreview->setText(QStringLiteral("文件缺失或无法读取"));
+                m_resourceImageInfo->setText(QStringLiteral("预览不可用"));
+            }
+        }
+        return;
+    }
+
+    m_resourceMediaStack->setCurrentWidget(m_resourceAudioPage);
+    ResourcePreviewPlayer* player = m_editorCore->previewPlayer();
+    if (player->resourceId() != resource->id
+        || player->relativePath() != resource->relativePath)
+        player->setResource(*resource); // 同 id 同路径不重载（别名修改不中断试听）
+    updateAudioControls();
+}
+
+void InspectorPanel::commitResourceName()
+{
+    if (m_updating)
+        return;
+    const ResourceData* resource = m_editorCore->findResource(m_editorCore->activeResourceId());
+    if (!resource)
+        return;
+    const QString name = m_resourceName->text().trimmed();
+    if (name == resource->name)
+        return;
+    if (name.isEmpty() || m_editorCore->isResourceNameTaken(name, resource->id)) {
+        QMessageBox::warning(
+            this, QStringLiteral("重命名失败"),
+            name.isEmpty() ? QStringLiteral("资源别名不能为空。")
+                           : QStringLiteral("资源别名“%1”已被占用：别名必须唯一。").arg(name));
+        m_resourceName->setText(resource->name);
+        return;
+    }
+    if (!m_editorCore->renameResource(resource->id, name))
+        m_resourceName->setText(resource->name);
+}
+
+void InspectorPanel::updateAudioControls()
+{
+    ResourcePreviewPlayer* player = m_editorCore->previewPlayer();
+    const ResourceData* resource = m_editorCore->findResource(m_editorCore->activeResourceId());
+    const bool current = resource && resource->type == ResourceType::Audio
+        && player->resourceId() == resource->id;
+    if (!current) {
+        m_resourceAudioStatus->clear();
+        m_resourceAudioTime->clear();
+        m_resourcePlay->setEnabled(false);
+        m_resourcePause->setEnabled(false);
+        m_resourceStop->setEnabled(false);
+        return;
+    }
+
+    QString status;
+    QString color = QStringLiteral("#888888");
+    switch (player->state()) {
+    case ResourcePreviewPlayer::State::NoResource:
+        break;
+    case ResourcePreviewPlayer::State::Loading:
+        status = QStringLiteral("正在读取媒体信息…");
+        break;
+    case ResourcePreviewPlayer::State::Ready:
+        status = QStringLiteral("就绪");
+        break;
+    case ResourcePreviewPlayer::State::Missing:
+        status = QStringLiteral("文件缺失：%1").arg(player->errorString());
+        color = QStringLiteral("#c05050");
+        break;
+    case ResourcePreviewPlayer::State::Error:
+        status = QStringLiteral("无法播放：%1").arg(player->errorString());
+        color = QStringLiteral("#c05050");
+        break;
+    }
+    m_resourceAudioStatus->setStyleSheet(QStringLiteral("color: %1;").arg(color));
+    m_resourceAudioStatus->setText(status);
+    m_resourceAudioTime->setText(
+        QStringLiteral("%1 / %2")
+            .arg(formatMediaTime(player->position()),
+                 player->duration() > 0 ? formatMediaTime(player->duration())
+                                        : QStringLiteral("--:--")));
+
+    const bool canPlay = player->state() == ResourcePreviewPlayer::State::Ready
+        || player->state() == ResourcePreviewPlayer::State::Loading;
+    m_resourcePlay->setEnabled(canPlay && !player->isPlaying());
+    m_resourcePause->setEnabled(player->isPlaying());
+    m_resourceStop->setEnabled(canPlay || player->isPlaying());
+}
+
+void InspectorPanel::playActiveResource()
+{
+    const ResourceData* resource = m_editorCore->findResource(m_editorCore->activeResourceId());
+    if (!resource || resource->type != ResourceType::Audio)
+        return;
+    ResourcePreviewPlayer* player = m_editorCore->previewPlayer();
+    if (player->resourceId() != resource->id)
+        player->setResource(*resource);
+    player->play(); // 试听开始 → EditorCore 暂停时间轴（播放互斥）
+    updateAudioControls();
+}
+
+void InspectorPanel::clearResourcePreviewCache()
+{
+    m_resourceShownId.clear();
+    m_resourceShownPath.clear();
+    m_resourceImageValid = false;
+    if (m_resourceImagePreview) {
+        m_resourceImagePreview->clearImage();
+        m_resourceImageInfo->clear();
+    }
 }

@@ -37,6 +37,10 @@
 // 合围校验纯函数全分支（validatePropShape：顶点数/零长边/直线与弧边自交/退化）；
 // 阻挡判定（pathBlocked：屏风/不可站立道具扫掠相交，演员不挡，自身排除，不溯及
 // 既往）+ PathCommands 五类操作提交前拒绝。
+// 阶段14：存档 v6——FileData.resources 项目资源库（往返逐字段 / v5 迁移为空 /
+// 非法路径与重复 id/别名拒载）；ResourceFiles 路径安全、导入复制不覆盖、
+// 另存为整目录复制（含未引用文件）；EditorCore 资源添加/移除/重命名命令及
+// 撤销重做、资源与对象/双帧段/路径的选中仲裁。
 // 阶段13 修复（开发者实测漏洞）：位置变更类关键帧写入统一收口
 // UpsertKeyframesCommand 扫掠判定——受影响相邻段逐段判定（更新帧前后两段/插入
 // 劈段劈出两段/首前末后单侧），纯旋转/零位移跳过，穿阻挡整条回滚零撤销条目；
@@ -52,12 +56,15 @@
 #include "data/AppSettings.h"
 #include "data/DataTypes.h"
 #include "data/JsonStore.h"
+#include "data/ResourceFiles.h"
 #include "data/RuntimeData.h"
 #include "render/RenderUtil.h"
 
 #include <QCoreApplication>
+#include <QDir>
 #include <QEventLoop>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -1511,7 +1518,7 @@ void testCorruptedFile(QTemporaryDir& dir)
     CHECK(!arrayResult.ok() && arrayResult.error == LoadError::Parse, "根节点为数组返回 LoadError::Parse");
 }
 
-// 阶段13 改写：版本受理区间 [1, 5]——v6（未来版本）拒载；v1 存档（无 prepAreas
+// 阶段14 改写：版本受理区间 [1, 6]——v7（未来版本）拒载；v1 存档（无 prepAreas
 // 节点）宽容迁移为空列表；v2 存档（prepAreas 元素无 color 键）宽容迁移为派生态；
 // v3 存档（无 paths 节点）宽容迁移为空路径列表；v4 存档（对象无道具字段）宽容
 // 缺省（仿 testParentGroupJson 的剥字段兼容模式）
@@ -1519,12 +1526,12 @@ void testVersionMismatch(QTemporaryDir& dir)
 {
     QJsonObject root = JsonStore::toJson(FileData::createDefault());
 
-    root[QStringLiteral("version")] = 6;
-    const QString futurePath = dir.filePath(QStringLiteral("v6.json"));
+    root[QStringLiteral("version")] = 7;
+    const QString futurePath = dir.filePath(QStringLiteral("v7.json"));
     writeTextFile(futurePath, QJsonDocument(root).toJson());
     const LoadResult futureResult = JsonStore::load(futurePath);
     CHECK(!futureResult.ok() && futureResult.error == LoadError::UnsupportedVersion,
-          "version=6（高于当前）返回 LoadError::UnsupportedVersion");
+          "version=7（高于当前）返回 LoadError::UnsupportedVersion");
 
     root[QStringLiteral("version")] = 0;
     const QString lowPath = dir.filePath(QStringLiteral("v0.json"));
@@ -3087,6 +3094,235 @@ int verifySettings()
 
 } // namespace
 
+// 阶段14：资源库 Schema v6 / ResourceFiles 文件辅助 / EditorCore 资源命令与选中仲裁
+void testResources(QTemporaryDir& dir)
+{
+    // ---- 默认空资源库 + v6 往返 ----
+    CHECK(FileData::createDefault().resources.isEmpty(), "阶段14：默认资源库为空");
+
+    FileData data = FileData::createDefault();
+    ResourceData audio;
+    audio.id = QStringLiteral("res-audio-001");
+    audio.type = ResourceType::Audio;
+    audio.name = QStringLiteral("背景音乐");
+    audio.originalName = QStringLiteral("bgm.mp3");
+    audio.relativePath = QStringLiteral("audio/res-audio-001.mp3");
+    data.resources.append(audio);
+    ResourceData image;
+    image.id = QStringLiteral("res-image-001");
+    image.type = ResourceType::Image;
+    image.name = QStringLiteral("幕布");
+    image.originalName = QStringLiteral("curtain.png");
+    image.relativePath = QStringLiteral("images/res-image-001.png");
+    data.resources.append(image);
+
+    const QString resourceJson = dir.filePath(QStringLiteral("stage14-resources.json"));
+    CHECK(JsonStore::save(resourceJson, data).ok, "阶段14：资源库存档保存成功");
+    const LoadResult resourceLoaded = JsonStore::load(resourceJson);
+    CHECK(resourceLoaded.ok(), "阶段14：资源库存档读回成功");
+    CHECK(resourceLoaded.data.resources == data.resources,
+          "阶段14：ResourceData 逐字段往返一致");
+    CHECK(resourceLoaded.data == data, "阶段14：含资源库 FileData 整体一致");
+
+    // ---- v5 迁移：无 resources 节点 → 空列表 ----
+    QJsonObject legacyRoot = JsonStore::toJson(FileData::createDefault());
+    legacyRoot[QStringLiteral("version")] = 5;
+    legacyRoot.remove(QStringLiteral("resources"));
+    const QString legacyPath = dir.filePath(QStringLiteral("stage14-v5-legacy.json"));
+    writeTextFile(legacyPath, QJsonDocument(legacyRoot).toJson());
+    const LoadResult legacyLoaded = JsonStore::load(legacyPath);
+    CHECK(legacyLoaded.ok() && legacyLoaded.data.resources.isEmpty(),
+          "阶段14：v5 存档无 resources 节点迁移为空资源库");
+    CHECK(legacyLoaded.data.version == kFileDataVersion,
+          "阶段14：v5 迁移后版本号升到当前版本");
+
+    // ---- 结构校验：路径逃逸 / 重复 id / 重复别名 ----
+    const auto resourcesRoot = [&data] {
+        return JsonStore::toJson(data);
+    };
+    {
+        QJsonObject root = resourcesRoot();
+        QJsonArray resources = root.value(QStringLiteral("resources")).toArray();
+        QJsonObject first = resources.at(0).toObject();
+        first[QStringLiteral("relativePath")] = QStringLiteral("audio/../evil.mp3");
+        resources[0] = first;
+        root[QStringLiteral("resources")] = resources;
+        const QString path = dir.filePath(QStringLiteral("stage14-escape.json"));
+        writeTextFile(path, QJsonDocument(root).toJson());
+        const LoadResult result = JsonStore::load(path);
+        CHECK(!result.ok() && result.error == LoadError::InvalidData,
+              "阶段14：资源路径含 .. 逃逸被拒绝");
+    }
+    {
+        QJsonObject root = resourcesRoot();
+        QJsonArray resources = root.value(QStringLiteral("resources")).toArray();
+        QJsonObject second = resources.at(1).toObject();
+        second[QStringLiteral("id")] = audio.id;
+        resources[1] = second;
+        root[QStringLiteral("resources")] = resources;
+        const QString path = dir.filePath(QStringLiteral("stage14-duplicate-id.json"));
+        writeTextFile(path, QJsonDocument(root).toJson());
+        const LoadResult result = JsonStore::load(path);
+        CHECK(!result.ok() && result.error == LoadError::InvalidData,
+              "阶段14：资源 id 重复被拒绝");
+    }
+    {
+        QJsonObject root = resourcesRoot();
+        QJsonArray resources = root.value(QStringLiteral("resources")).toArray();
+        QJsonObject second = resources.at(1).toObject();
+        second[QStringLiteral("name")] = audio.name;
+        resources[1] = second;
+        root[QStringLiteral("resources")] = resources;
+        const QString path = dir.filePath(QStringLiteral("stage14-duplicate-name.json"));
+        writeTextFile(path, QJsonDocument(root).toJson());
+        const LoadResult result = JsonStore::load(path);
+        CHECK(!result.ok() && result.error == LoadError::InvalidData,
+              "阶段14：资源别名重复被拒绝");
+    }
+    {
+        QJsonObject root = resourcesRoot();
+        root[QStringLiteral("resources")] = QStringLiteral("not-an-array");
+        const QString path = dir.filePath(QStringLiteral("stage14-not-array.json"));
+        writeTextFile(path, QJsonDocument(root).toJson());
+        const LoadResult result = JsonStore::load(path);
+        CHECK(!result.ok() && result.error == LoadError::InvalidData,
+              "阶段14：resources 非数组被拒绝");
+    }
+
+    // ---- ResourceFiles：路径安全 / 导入复制（不覆盖）/ 整目录复制 ----
+    CHECK(ResourceFiles::isSafeRelativePath(QStringLiteral("audio/a.mp3")),
+          "阶段14：常规相对路径安全");
+    CHECK(!ResourceFiles::isSafeRelativePath(QStringLiteral("../a.mp3")),
+          "阶段14：.. 路径被拒绝");
+    CHECK(!ResourceFiles::isSafeRelativePath(QStringLiteral("C:/a.mp3")),
+          "阶段14：盘符绝对路径被拒绝");
+    CHECK(!ResourceFiles::isSafeRelativePath(QStringLiteral("/a.mp3")),
+          "阶段14：根路径被拒绝");
+
+    const QString projectDir = dir.filePath(QStringLiteral("stage14-project"));
+    CHECK(QDir().mkpath(projectDir), "阶段14：创建资源测试项目目录");
+    const QString archivePath = QDir(projectDir).filePath(QStringLiteral("stage.json"));
+    const QString sourcePath = QDir(projectDir).filePath(QStringLiteral("source.mp3"));
+    writeTextFile(sourcePath, QByteArrayLiteral("fake-audio"));
+
+    QString relativePath;
+    QString error;
+    CHECK(ResourceFiles::importResourceFile(archivePath, ResourceType::Audio,
+                                             QStringLiteral("res-test-001"), sourcePath,
+                                             relativePath, error),
+          "阶段14：资源文件导入复制成功");
+    CHECK(relativePath == QStringLiteral("audio/res-test-001.mp3"),
+          "阶段14：导入相对路径按类型目录 + 资源 ID 生成");
+    const QString absoluteImported = ResourceFiles::resolveResourcePath(archivePath, relativePath);
+    CHECK(!absoluteImported.isEmpty() && QFileInfo::exists(absoluteImported),
+          "阶段14：导入文件真实落盘");
+    CHECK(ResourceFiles::resolveResourcePath(archivePath, QStringLiteral("../evil.mp3")).isEmpty(),
+          "阶段14：解析逃逸路径返回空");
+
+    QString secondRelative;
+    CHECK(ResourceFiles::importResourceFile(archivePath, ResourceType::Audio,
+                                             QStringLiteral("res-test-001"), sourcePath,
+                                             secondRelative, error),
+          "阶段14：同 ID 再次导入成功");
+    CHECK(secondRelative != relativePath
+              && secondRelative == QStringLiteral("audio/res-test-001-2.mp3"),
+          "阶段14：同 ID 导入不覆盖既有文件（追加序号）");
+
+    // 未被清单引用的文件也必须随另存为整体复制
+    const QString orphanPath = QDir(ResourceFiles::resourceRootDir(archivePath))
+                                   .filePath(QStringLiteral("audio/orphan.bin"));
+    writeTextFile(orphanPath, QByteArrayLiteral("orphan"));
+
+    const QString targetProjectDir = dir.filePath(QStringLiteral("stage14-copy"));
+    CHECK(QDir().mkpath(targetProjectDir), "阶段14：创建另存为目标目录");
+    const QString targetArchive = QDir(targetProjectDir).filePath(QStringLiteral("stage.json"));
+    CHECK(ResourceFiles::copyResourceTree(archivePath, targetArchive, error),
+          "阶段14：另存为复制整个资源目录");
+    const QString targetRoot = ResourceFiles::resourceRootDir(targetArchive);
+    CHECK(QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/res-test-001.mp3"))),
+          "阶段14：复制后资源文件在新位置可用");
+    CHECK(QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/res-test-001-2.mp3"))),
+          "阶段14：复制包含同 ID 的第二个副本");
+    CHECK(QFileInfo::exists(QDir(targetRoot).filePath(QStringLiteral("audio/orphan.bin"))),
+          "阶段14：复制包含暂未被清单引用的文件");
+
+    // ---- EditorCore：添加/移除/重命名命令与选中仲裁 ----
+    RuntimeData runtime;
+    EditorCore core(&runtime);
+    ResourceData first = audio;
+    ResourceData second = image;
+    CHECK(core.addResources({ first, second }), "阶段14：批量添加资源一条命令提交");
+    CHECK(runtime.fileData().resources.size() == 2, "阶段14：资源清单落数据层");
+    CHECK(runtime.isDirty(), "阶段14：资源修改弄脏存档（operator== 含 resources）");
+    CHECK(core.findResource(first.id) != nullptr, "阶段14：findResource 命中");
+    CHECK(core.isResourceNameTaken(first.name, first.id) == false,
+          "阶段14：别名占用检查排除自身");
+    CHECK(core.isResourceNameTaken(first.name), "阶段14：别名占用检查命中他人");
+    CHECK(core.uniqueResourceName(first.name) == QStringLiteral("背景音乐 (2)"),
+          "阶段14：自动命名按 名称 (2) 递增");
+    CHECK(core.generateResourceId().startsWith(QStringLiteral("res-")),
+          "阶段14：资源 ID 前缀 res-");
+
+    ResourceData unsafe = first;
+    unsafe.id = QStringLiteral("res-unsafe");
+    unsafe.name = QStringLiteral("不安全");
+    unsafe.relativePath = QStringLiteral("../escape.mp3");
+    CHECK(!core.addResources({ unsafe }), "阶段14：非法相对路径拒绝进入清单");
+    ResourceData duplicateName = first;
+    duplicateName.id = QStringLiteral("res-duplicate");
+    duplicateName.relativePath = QStringLiteral("audio/duplicate.mp3");
+    CHECK(!core.addResources({ duplicateName }), "阶段14：重复别名拒绝进入清单");
+
+    CHECK(core.undo(), "阶段14：撤销批量添加");
+    CHECK(runtime.fileData().resources.isEmpty(), "阶段14：撤销后资源清单为空");
+    CHECK(core.redo(), "阶段14：重做批量添加");
+    CHECK(runtime.fileData().resources.size() == 2, "阶段14：重做后资源恢复");
+
+    CHECK(!core.renameResource(first.id, QString()), "阶段14：空别名拒绝");
+    CHECK(!core.renameResource(first.id, second.name), "阶段14：重名别名拒绝");
+    CHECK(core.renameResource(first.id, QStringLiteral("开场曲")), "阶段14：合法改名提交");
+    CHECK(core.findResource(first.id)->name == QStringLiteral("开场曲"), "阶段14：改名生效");
+    CHECK(core.undo(), "阶段14：撤销改名");
+    CHECK(core.findResource(first.id)->name == first.name, "阶段14：撤销改名还原");
+
+    CHECK(core.removeResource(second.id), "阶段14：移除资源");
+    CHECK(runtime.fileData().resources.size() == 1, "阶段14：移除后清单减少");
+    CHECK(core.undo(), "阶段14：撤销移除资源");
+    CHECK(runtime.fileData().resources.size() == 2
+              && runtime.fileData().resources.at(1).id == second.id,
+          "阶段14：撤销移除原位恢复");
+
+    // 选中仲裁：资源 ↔ 对象/双帧段/路径
+    CHECK(core.createObject(ObjectType::Actor, QPointF(0.0, 0.0)),
+          "阶段14：创建对象用于选中仲裁");
+    const QString objectId = core.selection()->singleSelectedId();
+    core.setActiveResource(first.id);
+    CHECK(core.selection()->isEmpty(), "阶段14：选中资源清除对象选择");
+    CHECK(core.activeResourceId() == first.id, "阶段14：资源选中态生效");
+    core.selection()->select(objectId);
+    CHECK(core.activeResourceId().isEmpty(), "阶段14：选中对象清除资源选中态");
+
+    core.setActiveResource(first.id);
+    core.setActiveSegment(SegmentRef { objectId, 0.0, 1.0 });
+    CHECK(core.activeResourceId().isEmpty(), "阶段14：选中双帧段清除资源选中态");
+    core.setActiveSegment(std::nullopt);
+
+    core.setActiveResource(first.id);
+    core.setActivePath(ActivePathRef { SegmentRef { objectId, 0.0, 1.0 }, -1 });
+    CHECK(core.activeResourceId().isEmpty(), "阶段14：选中路径清除资源选中态");
+    core.setActivePath(std::nullopt);
+
+    core.setActiveResource(second.id);
+    CHECK(core.removeResource(second.id), "阶段14：删除当前选中资源");
+    CHECK(core.activeResourceId().isEmpty(), "阶段14：删除资源后清空其选中态");
+    CHECK(!core.undo() || core.activeResourceId().isEmpty(),
+          "阶段14：撤销删除不强制自动选中");
+
+    runtime.newFile();
+    CHECK(runtime.fileData().resources.isEmpty(), "阶段14：新建文件资源库为空");
+    CHECK(core.activeResourceId().isEmpty(), "阶段14：新建文件清空资源选中态");
+}
+
 int main(int argc, char* argv[])
 {
     QCoreApplication app(argc, argv);
@@ -3129,6 +3365,7 @@ int main(int argc, char* argv[])
     testPrepAreas();
     testPaths();
     testPropFields(dir);
+    testResources(dir);
     testShapeEditing();
     testBlocking();
     testTransformBlocking();

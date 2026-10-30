@@ -13,6 +13,7 @@
 
 #include "Commands.h"
 #include "KeyframeCommands.h" // ObjectKeyframe（关键帧剪贴板条目）
+#include "ResourcePreviewPlayer.h"
 #include "SelectionModel.h"
 #include "TimelinePlayer.h"
 #include "UndoStack.h"
@@ -67,6 +68,7 @@ public:
     RuntimeData* runtimeData() const { return m_runtimeData; }
     SelectionModel* selection() { return &m_selection; }
     TimelinePlayer* timelinePlayer() { return &m_timelinePlayer; }
+    ResourcePreviewPlayer* previewPlayer() { return &m_previewPlayer; }
 
     // 打帧询问回调：渲染层弹窗实现（含"不再提示"勾选），返回 true=打帧。
     // 业务层只在确实需要询问时调用（未抑制且 T 处无关键帧）。
@@ -185,6 +187,23 @@ public:
     std::optional<ActivePathRef> activePath() const { return m_activePath; }
     void setActivePath(const std::optional<ActivePathRef>& path);
 
+    // ---- 项目资源库（阶段14，命令入撤销栈；选中态为运行时状态不存档）----
+    const ResourceData* findResource(const QString& id) const;
+    bool isResourceNameTaken(const QString& name, const QString& excludeId = QString()) const;
+    QString generateResourceId() const; // res-<uuid>，全库唯一且不复用
+    // "名称"/"名称 (2)"…；reservedNames 供批量导入在提交前预留本批已用别名
+    QString uniqueResourceName(const QString& baseName,
+                               const QSet<QString>& reservedNames = {}) const;
+    // 导入成功项批量提交（一条命令一步撤销）；校验 id/别名唯一、路径安全
+    bool addResources(const QList<ResourceData>& resources);
+    bool removeResource(const QString& id);                 // 只删清单，不删磁盘文件
+    bool renameResource(const QString& id, const QString& name); // 空名/重名拒绝
+
+    QString activeResourceId() const { return m_activeResourceId; }
+    // 选中资源：清空对象选择、双帧段与路径选择；传空串清除资源选中态。
+    // 对象/路径选中、资源被删除、新建/打开项目时资源选中态自动清除。
+    void setActiveResource(const QString& id);
+
     // ---- 移动路径（阶段12，全部走命令入撤销栈；级联见关键帧/对象命令）----
     const PathData* findPath(const QString& objectId, double from, double to) const;
     bool setPathType(const QString& objectId, double from, double to, PathType type);
@@ -204,6 +223,7 @@ signals:
     void undoStackChanged(); // 入栈/撤销/重做/清空后发出，供菜单可用性刷新
     void activeSegmentChanged(); // 双帧段选中态变化（含清除为 nullopt）
     void activePathChanged();    // 选中路径变化（含清除为 nullopt）
+    void activeResourceChanged(); // 资源选中态变化（含清除为空串）
 
 private:
     QString nextFreeId(ObjectType type, QSet<QString>& taken) const; // 占用集合就地更新
@@ -213,9 +233,11 @@ private:
     QColor nextPaletteColor();                                       // 调色板轮转
     void pruneSelection();                                           // 剔除已不存在的选中 id
     void pruneActivePath(); // 剔除失效的选中路径（段/路径点不存在即清除，fileDataChanged）
+    void pruneActiveResource(); // 剔除已删除资源的选中态（fileDataChanged）
 
     RuntimeData* m_runtimeData = nullptr; // 不拥有
     TimelinePlayer m_timelinePlayer;      // 游标/插值/播放（运行时状态，不入存档）
+    ResourcePreviewPlayer m_previewPlayer; // 音频试听（运行时状态，不入存档）
     SelectionModel m_selection;
     QList<ObjectData> m_clipboard;
     QList<ObjectKeyframe> m_keyframeClipboard; // 关键帧级剪贴板（独立于对象剪贴板）
@@ -223,4 +245,5 @@ private:
     int m_paletteCursor = 0;
     std::optional<SegmentRef> m_activeSegment; // 双帧段选中态（阶段12，运行时状态）
     std::optional<ActivePathRef> m_activePath; // 选中路径（阶段12，运行时状态）
+    QString m_activeResourceId; // 资源选中态（阶段14，运行时状态，不入存档）
 };
